@@ -5,6 +5,7 @@ from tkinter import ttk, filedialog, messagebox, simpledialog
 from pathlib import Path
 import threading
 import re
+import ctypes
 
 import windnd
 
@@ -46,13 +47,14 @@ class ArchiveFileItem:
 
 
 class PasswordEditorDialog(tk.Toplevel):
-    def __init__(self, parent, password_manager: PasswordManager):
+    def __init__(self, parent, password_manager: PasswordManager, on_change=None):
         super().__init__(parent)
         self.title("密码库编辑")
         self.geometry("500x500")
         self.minsize(400, 350)
         self._pm = password_manager
         self._mode = tk.StringVar(value="builtin")
+        self._on_change = on_change
         self.transient(parent)
         self.grab_set()
         self._build_ui()
@@ -90,7 +92,12 @@ class PasswordEditorDialog(tk.Toplevel):
 
         self._status_label = ttk.Label(self, text="", foreground="gray")
         self._status_label.pack(fill=tk.X, padx=10, pady=(5, 10))
-        ttk.Button(self, text="关闭", command=self.destroy).pack(pady=(0, 10))
+        ttk.Button(self, text="关闭", command=self._close).pack(pady=(0, 10))
+
+    def _close(self):
+        if self._on_change:
+            self._on_change()
+        self.destroy()
 
     def _switch(self, mode):
         self._mode.set(mode)
@@ -167,14 +174,20 @@ class SmartExtractorApp:
         self._completed: list[ArchiveFileItem] = []
         self._output_dir = Path.home() / "Extracted"
         self._password_manager = PasswordManager()
+        self._password_file = Path(__file__).resolve().parent.parent / "passwords.txt"
+        self._pwdfile_var = tk.StringVar()
         self._auto_rename = tk.BooleanVar(value=True)
         self._auto_password = tk.BooleanVar(value=True)
+        self._delete_mode = tk.StringVar(value="none")  # "none" | "delete" | "recycle"
+        self._wrap_folder = tk.BooleanVar(value=True)
         self._cancel_flag = threading.Event()
         self._current_thread: threading.Thread | None = None
         self._theme = tk.StringVar(value="system")
 
         self._build_ui()
         self._apply_theme()
+        self._load_persistent_passwords()
+        self._update_pwd_count_display()
         self._refresh_status()
 
     # ============================================================
@@ -187,7 +200,8 @@ class SmartExtractorApp:
         top_frame.pack(fill=tk.X)
         ttk.Label(top_frame, text="智能解压工具", font=("Microsoft YaHei", 16, "bold")).pack(side=tk.LEFT)
         ttk.Label(top_frame, text="主题:").pack(side=tk.LEFT, padx=(20, 2))
-        theme_cb = ttk.Combobox(top_frame, textvariable=self._theme, values=["system", "light", "dark"],
+        theme_cb = ttk.Combobox(top_frame, textvariable=self._theme,
+                                values=["system", "light", "dark", "midnight", "moss", "sepia", "mono"],
                                 state="readonly", width=10)
         theme_cb.pack(side=tk.LEFT)
         theme_cb.bind("<<ComboboxSelected>>", lambda e: self._apply_theme())
@@ -244,6 +258,11 @@ class SmartExtractorApp:
         self._tree_done.pack(side=tk.LEFT, fill=tk.BOTH, expand=True)
         d_scroll.pack(side=tk.RIGHT, fill=tk.Y)
 
+        # Right-click menu for completed
+        self._done_menu = tk.Menu(self.root, tearoff=0)
+        self._done_menu.add_command(label="还原到待解压", command=self._restore_selected)
+        self._tree_done.bind("<Button-3>", self._on_done_right_click)
+
         # --- Toolbar below panels ---
         toolbar = ttk.Frame(self.root)
         toolbar.pack(fill=tk.X, padx=10, pady=(0, 5))
@@ -251,6 +270,7 @@ class SmartExtractorApp:
         ttk.Button(toolbar, text="添加文件夹", command=self._add_directory).pack(side=tk.LEFT, padx=2)
         ttk.Button(toolbar, text="移除选中", command=self._remove_selected).pack(side=tk.LEFT, padx=2)
         ttk.Button(toolbar, text="清空待解压", command=self._clear_pending).pack(side=tk.LEFT, padx=2)
+        ttk.Button(toolbar, text="还原选中", command=self._restore_selected).pack(side=tk.LEFT, padx=2)
         ttk.Button(toolbar, text="清空已完成", command=self._clear_completed).pack(side=tk.LEFT, padx=2)
 
         # --- Options panel ---
@@ -267,7 +287,6 @@ class SmartExtractorApp:
         row2 = ttk.Frame(opt_frame)
         row2.pack(fill=tk.X, pady=2)
         ttk.Label(row2, text="密码字典:").pack(side=tk.LEFT)
-        self._pwdfile_var = tk.StringVar()
         ttk.Entry(row2, textvariable=self._pwdfile_var, width=42).pack(side=tk.LEFT, fill=tk.X, expand=True, padx=5)
         ttk.Button(row2, text="浏览", command=self._browse_password_file).pack(side=tk.LEFT)
         ttk.Button(row2, text="编辑", command=self._open_password_editor).pack(side=tk.LEFT, padx=1)
@@ -280,6 +299,19 @@ class SmartExtractorApp:
         self._pwd_count_label = ttk.Label(row3, text="")
         self._pwd_count_label.pack(side=tk.LEFT)
         self._update_pwd_count_display()
+
+        row4 = ttk.Frame(opt_frame)
+        row4.pack(fill=tk.X, pady=2)
+        ttk.Label(row4, text="输出方式:").pack(side=tk.LEFT)
+        ttk.Radiobutton(row4, text="解压到压缩包目录", variable=self._wrap_folder, value=False).pack(side=tk.LEFT, padx=(5, 10))
+        ttk.Radiobutton(row4, text="解压到同名文件夹", variable=self._wrap_folder, value=True).pack(side=tk.LEFT)
+
+        row5 = ttk.Frame(opt_frame)
+        row5.pack(fill=tk.X, pady=2)
+        ttk.Label(row5, text="解压后:").pack(side=tk.LEFT)
+        ttk.Radiobutton(row5, text="保留压缩包", variable=self._delete_mode, value="none").pack(side=tk.LEFT, padx=(5, 10))
+        ttk.Radiobutton(row5, text="移到回收站", variable=self._delete_mode, value="recycle").pack(side=tk.LEFT, padx=(0, 10))
+        ttk.Radiobutton(row5, text="直接删除", variable=self._delete_mode, value="delete").pack(side=tk.LEFT)
 
         # --- Progress bar ---
         self._progress = ttk.Progressbar(self.root, mode="determinate", length=400)
@@ -317,44 +349,102 @@ class SmartExtractorApp:
     def _apply_theme(self):
         style = ttk.Style()
         theme_name = self._theme.get()
+        available = style.theme_names()
+        base = "clam" if "clam" in available else available[0]
 
         if theme_name == "system":
             for t in ("vista", "winnative", "clam", "alt", "default"):
-                if t in style.theme_names():
+                if t in available:
                     style.theme_use(t)
                     break
             self.root.configure(bg="")
             self._log_text.configure(bg="white", fg="black", insertbackground="black")
 
         elif theme_name == "light":
-            available = style.theme_names()
-            style.theme_use("clam" if "clam" in available else available[0])
-            style.configure("TFrame", background="#f0f0f0")
-            style.configure("TLabel", background="#f0f0f0")
-            style.configure("TLabelframe", background="#f0f0f0")
-            style.configure("TButton", background="#e0e0e0")
-            style.configure("TCheckbutton", background="#f0f0f0")
-            style.configure("TEntry", fieldbackground="white")
-            self.root.configure(bg="#f0f0f0")
-            self._log_text.configure(bg="white", fg="#333333", insertbackground="#333333")
+            style.theme_use(base)
+            style.configure("TFrame", background="#f5f5f5")
+            style.configure("TLabel", background="#f5f5f5", foreground="#1a1a1a")
+            style.configure("TLabelframe", background="#f5f5f5", foreground="#1a1a1a")
+            style.configure("TLabelframe.Label", background="#f5f5f5", foreground="#1a1a1a")
+            style.configure("TButton", background="#e8e8e8", foreground="#1a1a1a", borderwidth=1)
+            style.map("TButton", background=[("active", "#d0d0d0")])
+            style.configure("TCheckbutton", background="#f5f5f5", foreground="#1a1a1a")
+            style.configure("TRadiobutton", background="#f5f5f5", foreground="#1a1a1a")
+            style.configure("TEntry", fieldbackground="white", foreground="#1a1a1a")
+            style.configure("TCombobox", fieldbackground="white", foreground="#1a1a1a")
+            style.configure("TProgressbar", background="#4a90d9", troughcolor="#e0e0e0")
+            style.configure("Treeview", background="white", foreground="#1a1a1a", fieldbackground="white")
+            style.configure("Treeview.Heading", background="#e8e8e8", foreground="#1a1a1a")
+            style.map("Treeview", background=[("selected", "#4a90d9")], foreground=[("selected", "white")])
+            self.root.configure(bg="#f5f5f5")
+            self._log_text.configure(bg="white", fg="#1a1a1a", insertbackground="#1a1a1a")
 
         elif theme_name == "dark":
-            available = style.theme_names()
-            style.theme_use("clam" if "clam" in available else available[0])
-            style.configure("TFrame", background="#2d2d2d")
-            style.configure("TLabel", background="#2d2d2d", foreground="#e0e0e0")
-            style.configure("TLabelframe", background="#2d2d2d", foreground="#e0e0e0")
-            style.configure("TLabelframe.Label", background="#2d2d2d", foreground="#e0e0e0")
-            style.configure("TButton", background="#3d3d3d", foreground="#e0e0e0")
-            style.map("TButton", background=[("active", "#4d4d4d")])
-            style.configure("TCheckbutton", background="#2d2d2d", foreground="#e0e0e0")
-            style.configure("TEntry", fieldbackground="#3d3d3d", foreground="#e0e0e0")
-            style.configure("TProgressbar", background="#4a90d9", troughcolor="#3d3d3d")
-            style.configure("Treeview", background="#3d3d3d", foreground="#e0e0e0", fieldbackground="#3d3d3d")
-            style.configure("Treeview.Heading", background="#4d4d4d", foreground="#e0e0e0")
-            style.map("Treeview", background=[("selected", "#4a90d9")])
-            self.root.configure(bg="#2d2d2d")
-            self._log_text.configure(bg="#1e1e1e", fg="#d4d4d4", insertbackground="#d4d4d4")
+            self._apply_dark_variant(style, base,
+                canvas="#07080a", surface="#0d0d0d", elevated="#101111",
+                card="#121212", hairline="#242728", ink="#f4f4f6",
+                body="#cdcdcd", mute="#9c9c9c", accent="#57c1ff")
+
+        elif theme_name == "midnight":
+            self._apply_dark_variant(style, base,
+                canvas="#0a0d14", surface="#101520", elevated="#151a28",
+                card="#1a2030", hairline="#1e2d3d", ink="#e8ecf2",
+                body="#b8c4d4", mute="#6b7d95", accent="#6a9fff")
+
+        elif theme_name == "moss":
+            self._apply_dark_variant(style, base,
+                canvas="#0a0f0a", surface="#0f150f", elevated="#141a14",
+                card="#1a201a", hairline="#243024", ink="#e8efe8",
+                body="#b8c8b8", mute="#6b846b", accent="#7acc7a")
+
+        elif theme_name == "sepia":
+            self._apply_dark_variant(style, base,
+                canvas="#1a1410", surface="#211a15", elevated="#28201a",
+                card="#2e2520", hairline="#3d3228", ink="#f0e8e0",
+                body="#c8b8a8", mute="#8c7a6a", accent="#d4a854")
+
+        elif theme_name == "mono":
+            self._apply_dark_variant(style, base,
+                canvas="#0a0a0a", surface="#121212", elevated="#181818",
+                card="#1e1e1e", hairline="#2a2a2a", ink="#fafafa",
+                body="#c0c0c0", mute="#7a7a7a", accent="#e0e0e0")
+
+    def _apply_dark_variant(self, style, base, *, canvas, surface, elevated, card,
+                            hairline, ink, body, mute, accent):
+        """Apply a dark theme variant with the given color palette."""
+        style.theme_use(base)
+
+        style.configure("TFrame", background=canvas)
+        style.configure("TLabel", background=canvas, foreground=body)
+        style.configure("TLabelframe", background=canvas, foreground=ink)
+        style.configure("TLabelframe.Label", background=canvas, foreground=ink)
+
+        style.configure("TButton", background=elevated, foreground=ink,
+                        borderwidth=1, focusthickness=0)
+        style.map("TButton",
+                  background=[("active", card), ("pressed", card)],
+                  foreground=[("active", ink), ("pressed", ink)])
+
+        style.configure("TCheckbutton", background=canvas, foreground=body)
+        style.configure("TRadiobutton", background=canvas, foreground=body)
+
+        style.configure("TEntry", fieldbackground=elevated, foreground=ink)
+
+        style.configure("TCombobox", fieldbackground=elevated, foreground=ink,
+                        background=elevated, arrowcolor=body)
+
+        style.configure("TProgressbar", background=accent, troughcolor=elevated)
+
+        style.configure("Treeview", background=surface, foreground=body,
+                        fieldbackground=surface, borderwidth=1, bordercolor=hairline)
+        style.configure("Treeview.Heading", background=elevated, foreground=ink,
+                        borderwidth=1, bordercolor=hairline)
+        style.map("Treeview",
+                  background=[("selected", accent)],
+                  foreground=[("selected", canvas)])
+
+        self.root.configure(bg=canvas)
+        self._log_text.configure(bg=surface, fg=body, insertbackground=body)
 
     # ============================================================
     #  File management
@@ -499,6 +589,34 @@ class SmartExtractorApp:
                 self._files[idx].specific_password = ""
         self._refresh_pending_list()
 
+    def _on_done_right_click(self, event):
+        iid = self._tree_done.identify_row(event.y)
+        if iid:
+            if iid not in self._tree_done.selection():
+                self._tree_done.selection_set(iid)
+            self._done_menu.post(event.x_root, event.y_root)
+
+    def _restore_selected(self):
+        """Move selected items from completed back to pending."""
+        selected = self._tree_done.selection()
+        if not selected:
+            return
+        indices = sorted([int(self._tree_done.index(iid)) for iid in selected], reverse=True)
+        restored = 0
+        for i in indices:
+            if 0 <= i < len(self._completed):
+                item = self._completed.pop(i)
+                item.status = "pending"
+                item.error_msg = ""
+                item.output_path = ""
+                self._files.append(item)
+                restored += 1
+        if restored:
+            self._ui_log(f"已还原 {restored} 个文件到待解压列表")
+        self._refresh_pending_list()
+        self._refresh_completed_list()
+        self._refresh_status()
+
     # ============================================================
     #  Options
     # ============================================================
@@ -517,9 +635,10 @@ class SmartExtractorApp:
             count = self._password_manager.load_custom(path)
             self._update_pwd_count_display()
             self._logger.log(f"已加载 {count} 个自定义密码")
+            self._save_persistent_passwords()
 
     def _open_password_editor(self):
-        PasswordEditorDialog(self.root, self._password_manager)
+        PasswordEditorDialog(self.root, self._password_manager, on_change=self._save_persistent_passwords)
         self._update_pwd_count_display()
 
     def _export_default_pwd(self):
@@ -528,6 +647,19 @@ class SmartExtractorApp:
         if path:
             save_builtin_passwords(path)
             self._logger.log(f"默认密码字典已导出到: {path}")
+
+    def _load_persistent_passwords(self):
+        """Auto-load custom passwords from passwords.txt on startup."""
+        if self._password_file.is_file():
+            count = self._password_manager.load_custom(self._password_file)
+            if count:
+                self._pwdfile_var.set(str(self._password_file))
+
+    def _save_persistent_passwords(self):
+        """Save custom passwords to passwords.txt."""
+        if self._password_manager.custom_count > 0:
+            self._password_manager.save_custom(self._password_file)
+            self._pwdfile_var.set(str(self._password_file))
 
     def _update_pwd_count_display(self):
         total = self._password_manager.total_count
@@ -579,6 +711,79 @@ class SmartExtractorApp:
         self._cancel_flag.set()
         self._logger.log("[用户] 正在停止...")
 
+    @staticmethod
+    def _recycle_file(filepath: Path) -> bool:
+        """Move a file to the Windows recycle bin. Returns True on success."""
+        try:
+            path_str = str(filepath.resolve())
+            # SHFileOperationW expects double-null-terminated string
+            buf = ctypes.create_unicode_buffer(path_str + "\0\0")
+            op = ctypes.c_int(0)
+            # FO_DELETE=3, FOF_ALLOWUNDO=0x40, FOF_WANTNUKEWARNING=0x4000
+            result = ctypes.windll.shell32.SHFileOperationW(
+                ctypes.byref(ctypes.c_uint(0)),  # hwnd
+                op,                               # wFunc (unused by SHFileOperationW)
+                ctypes.byref(ctypes.c_wchar_p(path_str)) if False else None,  # pFrom
+                None,                             # pTo
+                0x40 | 0x4000                     # fFlags: allow undo + no confirmation
+            )
+            # Correct way:
+            import struct
+            from ctypes import wintypes
+            class SHFILEOPSTRUCTW(ctypes.Structure):
+                _fields_ = [
+                    ("hwnd", wintypes.HWND),
+                    ("wFunc", ctypes.c_uint),
+                    ("pFrom", ctypes.c_wchar_p),
+                    ("pTo", ctypes.c_wchar_p),
+                    ("fFlags", ctypes.c_ushort),
+                    ("fAnyOperationsAborted", wintypes.BOOL),
+                    ("hNameMappings", ctypes.c_void_p),
+                    ("lpszProgressTitle", ctypes.c_wchar_p),
+                ]
+            fop = SHFILEOPSTRUCTW()
+            fop.hwnd = 0
+            fop.wFunc = 3  # FO_DELETE
+            fop.pFrom = buf
+            fop.pTo = None
+            fop.fFlags = 0x0040  # FOF_ALLOWUNDO
+            result = ctypes.windll.shell32.SHFileOperationW(ctypes.byref(fop))
+            return result == 0 and not fop.fAnyOperationsAborted
+        except Exception:
+            return False
+
+    def _delete_archive_files(self, archive_path: Path) -> int:
+        """Delete or recycle archive file(s) after successful extraction.
+
+        For split archives, processes all volumes. Returns count of processed files.
+        """
+        mode = self._delete_mode.get()
+        if mode == "none":
+            return 0
+
+        files: list[Path] = []
+        if is_split_archive(archive_path):
+            files = [v for v in find_volumes(archive_path) if v.exists()]
+        elif archive_path.exists():
+            files = [archive_path]
+
+        processed = 0
+        for f in files:
+            try:
+                if mode == "recycle":
+                    if self._recycle_file(f):
+                        self._ui_log(f"  已移到回收站: {f.name}")
+                        processed += 1
+                    else:
+                        self._ui_log(f"  ⚠ 回收失败: {f.name}")
+                elif mode == "delete":
+                    f.unlink()
+                    self._ui_log(f"  已删除: {f.name}")
+                    processed += 1
+            except OSError as e:
+                self._ui_log(f"  ⚠ 处理失败: {f.name} - {e}")
+        return processed
+
     def _try_password_list(self, archive_path, output_dir, passwords, progress_cb):
         tried = 0
         for pwd in passwords:
@@ -598,8 +803,16 @@ class SmartExtractorApp:
         return (False, None, "密码字典未找到正确密码")
 
     def _extract_one(self, archive_path, item, output):
-        """Extract one archive. Returns (output_dir, password_used)."""
-        item_output = output / item.path.stem
+        """Extract one archive. Returns (output_dir, password_used).
+
+        Output always goes to the archive's original directory.
+        'wrap_folder' controls whether a subfolder named after the archive is created.
+        """
+        base_dir = item.path.parent
+        if self._wrap_folder.get():
+            item_output = base_dir / item.path.stem
+        else:
+            item_output = base_dir
         item_output.mkdir(parents=True, exist_ok=True)
         auto_pwd = self._auto_password.get()
         final_password = None
@@ -745,12 +958,15 @@ class SmartExtractorApp:
                     pass
 
         # Output dir
-        stem = Path(first_vol.name).stem
-        stem = re.sub(r'\.part\d+', '', stem, flags=re.IGNORECASE)
-        stem = re.sub(r'\.r\d{2,}$', '', stem, flags=re.IGNORECASE)
-        stem = re.sub(r'\.\d{3,}$', '', stem, flags=re.IGNORECASE)
-        stem = stem.rstrip('.') or first_vol.stem
-        nest_output = first_vol.parent / stem
+        if self._wrap_folder.get():
+            stem = Path(first_vol.name).stem
+            stem = re.sub(r'\.part\d+', '', stem, flags=re.IGNORECASE)
+            stem = re.sub(r'\.r\d{2,}$', '', stem, flags=re.IGNORECASE)
+            stem = re.sub(r'\.\d{3,}$', '', stem, flags=re.IGNORECASE)
+            stem = stem.rstrip('.') or first_vol.stem
+            nest_output = first_vol.parent / stem
+        else:
+            nest_output = first_vol.parent
         nest_output.mkdir(parents=True, exist_ok=True)
 
         # Extract
@@ -799,6 +1015,8 @@ class SmartExtractorApp:
                 self._ui_log(f"      ⚠ 密码字典未匹配")
 
         if success:
+            if (self._delete_mode.get() != "none"):
+                self._delete_archive_files(first_vol)
             self._check_smart_nested(str(nest_output), nested_pwd or parent_password)
 
     def _process_nested_dir(self, dirpath: str, parent_password: str | None):
@@ -872,6 +1090,10 @@ class SmartExtractorApp:
             # Step 4: Extract
             item_output, parent_pwd = self._extract_one(first_vol, item, output)
             item.output_path = item_output
+
+            # Delete archive after successful extraction
+            if item.status == "done" and (self._delete_mode.get() != "none"):
+                self._delete_archive_files(first_vol)
 
             # Move to completed
             if item.status in ("done", "error"):
