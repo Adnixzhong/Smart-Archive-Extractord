@@ -7,19 +7,42 @@ from pathlib import Path
 from typing import Optional, Callable
 
 
+def _subprocess_kwargs() -> dict:
+    """Return kwargs to hide console windows on Windows."""
+    kwargs: dict = {}
+    if os.name == "nt":
+        kwargs["creationflags"] = subprocess.CREATE_NO_WINDOW
+        si = subprocess.STARTUPINFO()
+        si.dwFlags |= subprocess.STARTF_USESHOWWINDOW
+        si.wShowWindow = subprocess.SW_HIDE
+        kwargs["startupinfo"] = si
+    return kwargs
+
+
+_7Z_CACHE: Optional[Path] = None
+_7Z_SEARCHED = False
+
+
 def find_7z() -> Optional[Path]:
-    """Locate 7z.exe on the system."""
+    """Locate 7z.exe on the system (cached)."""
+    global _7Z_CACHE, _7Z_SEARCHED
+    if _7Z_SEARCHED:
+        return _7Z_CACHE
+    _7Z_SEARCHED = True
+
     # Check PATH first
     for cmd in ["7z", "7z.exe", "7za", "7za.exe"]:
         try:
             result = subprocess.run(
                 ["where", cmd] if os.name == "nt" else ["which", cmd],
-                capture_output=True, text=True, timeout=5
+                capture_output=True, text=True, timeout=5,
+                **_subprocess_kwargs(),
             )
             if result.returncode == 0:
                 found = result.stdout.strip().split("\n")[0].strip()
                 p = Path(found)
                 if p.is_file():
+                    _7Z_CACHE = p
                     return p
         except Exception:
             pass
@@ -37,6 +60,7 @@ def find_7z() -> Optional[Path]:
         ]
         for p in candidates:
             if p.is_file():
+                _7Z_CACHE = p
                 return p
 
     return None
@@ -105,7 +129,7 @@ def extract(
             text=True,
             encoding="utf-8",
             errors="replace",
-            creationflags=subprocess.CREATE_NO_WINDOW if os.name == "nt" else 0,
+            **_subprocess_kwargs(),
         )
     except Exception as e:
         raise ExtractError(f"Failed to start 7z: {e}")

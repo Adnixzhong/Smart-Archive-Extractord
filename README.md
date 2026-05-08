@@ -1,19 +1,22 @@
 # 智能解压工具 (Smart Archive Extractor)
 
-基于 Python + Tkinter 的 GUI 压缩包解压工具，使用 **7-Zip** 作为解压引擎，通过**文件头魔数 (magic bytes)** 智能识别压缩包格式，支持后缀名自动修正、分卷解压、密码字典爆破、嵌套压缩包自动解压。
+基于 Python + Tkinter 的 GUI 压缩包解压工具，使用 **7-Zip** 作为解压引擎，通过**文件头魔数 (magic bytes)** 智能识别压缩包格式，支持后缀名自动修正、分卷解压、密码字典爆破、嵌套压缩包全自动处理。
 
 ## 核心功能
 
 - **魔数格式检测** — 读取文件头二进制签名识别真实格式（ZIP/RAR/7z/TAR/GZ/BZ2/XZ/ZST/CAB/ISO/ARJ/LZH/LZ4），不依赖文件后缀名
 - **后缀名自动修正** — 检测到错误后缀名时自动重命名为正确后缀，分卷文件（.001/.r00/.part1.rar）不会被误改名
 - **分卷解压** — 自动识别并合并 .part1.rar / .r00 / .zip.001 / .7z.001 等分卷压缩包
-- **密码字典** — 内置约 200 个常见密码，支持自定义密码库（导入/编辑/导出），支持按文件单独设置密码
-- **智能嵌套解压** — 解压后自动检测输出目录：
-  - 单文件夹内含单个压缩包 → 自动解压
-  - 单文件夹内含多个文件/文件夹 → 列出结构并询问用户
-- **双面板文件列表** — 左侧「待解压」+ 右侧「已解压」，文件状态一目了然
+- **密码字典** — 内置约 200 个常见密码（中英文），支持自定义密码库（导入/编辑/导出），密码本自动持久化到 `passwords.txt`，按文件单独设置密码
+- **智能嵌套解压** — 解压后全自动检测：
+  - 单文件夹内含单个压缩包 → 自动解压（继承上级密码）
+  - 多文件/文件夹结构 → 自动扫描并解压所有内部压缩包
+  - 自动展平单层包装目录，清理残留压缩包
+- **双面板文件列表** — 左侧「待解压」+ 右侧「已解压」，支持右键设置密码、还原已解压文件到待解压列表
+- **解压后处理** — 三种模式：保留压缩包 / 移到回收站 / 直接删除，解压完成自动打开文件夹
 - **Windows 原生拖放** — 支持从资源管理器直接拖入文件/文件夹
-- **多套 UI 主题** — 系统默认 / 浅色清爽 / 深色护眼，一键切换
+- **7 套 UI 主题** — system / light / dark / midnight / moss / sepia / mono，一键切换
+- **零控制台闪烁** — 所有 subprocess 调用均在后台静默执行，`main.pyw` 无控制台启动
 
 ## 支持的格式
 
@@ -48,36 +51,35 @@
 
 ## 安装与运行
 
-### 依赖
+### 方式一：源码运行
 
-- **Python 3.8+** (开发环境 Python 3.13)
+**依赖**
+
+- **Python 3.9+**（3.8 不支持 `list[str]` 语法）
 - **7-Zip** — 需安装并确保 `7z.exe` 在 PATH 中，或安装到 `C:\Program Files\7-Zip\`
-  - 推荐 [7-Zip 官方版](https://www.7-zip.org/) 或 [7-Zip Zstandard](https://github.com/mcmilk/7-Zip-zstd)
 - **windnd** — Windows 原生拖放支持
 
-### 安装步骤
+**步骤**
 
 ```bash
-# 1. 克隆仓库
-git clone <your-repo-url>
-cd smart-archive-extractor
-
-# 2. 安装 Python 依赖
+git clone https://github.com/Adnixzhong/Smart-Archive-Extractord.git
+cd Smart-Archive-Extractord
 pip install windnd
-
-# 3. 安装 7-Zip
-# 从 https://www.7-zip.org/ 下载并安装
-
-# 4. 运行
-python main.py
+python main.py       # 控制台启动（调试用）
+# 或双击 main.pyw    # 无控制台启动（推荐）
 ```
 
-如果不便安装 7-Zip 到系统 PATH，可将 `7z.exe` 放到项目根目录，或安装到以下默认位置之一（程序会自动搜索）：
+### 方式二：打包的 EXE
 
-- `C:\Program Files\7-Zip\7z.exe`
-- `C:\Program Files (x86)\7-Zip\7z.exe`
-- `C:\Program Files\7-Zip-Zstandard\7z.exe`
-- `%LOCALAPPDATA%\Programs\7-Zip\7z.exe`
+使用 PyInstaller 打包为独立可执行文件（无需安装 Python）：
+
+```bash
+pip install PyInstaller
+pyinstaller --onefile --windowed --name "Smart Archive Extractor" main.py
+# 输出在 dist/Smart Archive Extractor.exe
+```
+
+**注意**：打包后的 EXE 仍需要目标机器安装 7-Zip。
 
 ## 使用说明
 
