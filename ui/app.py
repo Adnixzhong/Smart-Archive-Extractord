@@ -1,5 +1,6 @@
 """Smart Archive Extractor — GUI Application."""
 
+import os
 import sys
 import tkinter as tk
 from tkinter import ttk, filedialog, messagebox, simpledialog
@@ -14,7 +15,7 @@ from core.detector import detect_with_tar_combo, detect
 from core.split_detector import find_volumes, is_split_archive
 from core.renamer import get_correct_path, needs_rename
 from core.extractor import extract, find_7z, ExtractError, scan_for_archives
-from core.password import PasswordManager, save_builtin_passwords
+from core.password import PasswordManager
 
 
 class LogHandler:
@@ -52,8 +53,8 @@ class PasswordEditorDialog(tk.Toplevel):
                  app_colors=None, on_change=None):
         super().__init__(parent)
         self.title("密码库")
-        self.geometry("480x480")
-        self.minsize(400, 350)
+        self.geometry("500x520")
+        self.minsize(400, 380)
         self._C = app_colors or {
             "canvas": "#15181d", "surface": "#1c2026", "elevated": "#22262d",
             "card": "#292d35", "hairline": "#343840", "ink": "#e8eaed",
@@ -61,7 +62,6 @@ class PasswordEditorDialog(tk.Toplevel):
         }
         self.configure(bg=self._C["canvas"])
         self._pm = password_manager
-        self._mode = tk.StringVar(value="builtin")
         self._on_change = on_change
         self.transient(parent)
         self.grab_set()
@@ -71,13 +71,20 @@ class PasswordEditorDialog(tk.Toplevel):
     def _build_ui(self):
         C = self._C
 
-        tab_frame = ttk.Frame(self)
-        tab_frame.pack(fill=tk.X, padx=12, pady=(12, 8))
-        ttk.Button(tab_frame, text="内置密码", command=lambda: self._switch("builtin")).pack(side=tk.LEFT, padx=(0, 4))
-        ttk.Button(tab_frame, text="自定义密码", command=lambda: self._switch("custom")).pack(side=tk.LEFT, padx=4)
-        self._tab_label = ttk.Label(tab_frame, text="")
-        self._tab_label.pack(side=tk.RIGHT)
+        # Multi-line paste area + add button
+        add_label = ttk.Label(self, text="粘贴密码（一行一个）", font=("Segoe UI", 9))
+        add_label.pack(fill=tk.X, padx=12, pady=(12, 4))
+        self._add_text = tk.Text(self, height=4, wrap=tk.WORD,
+                                  bg=C["surface"], fg=C["body"],
+                                  insertbackground=C["body"],
+                                  borderwidth=1, highlightthickness=0,
+                                  font=("Cascadia Code", 10),
+                                  selectbackground=C["blue"],
+                                  selectforeground=C["canvas"])
+        self._add_text.pack(fill=tk.X, padx=12, pady=(0, 4))
+        ttk.Button(self, text="添加以上密码", command=self._add_passwords).pack(padx=12, pady=(0, 8), anchor="e")
 
+        # Password list
         list_frame = ttk.Frame(self)
         list_frame.pack(fill=tk.BOTH, expand=True, padx=12, pady=4)
         self._listbox = tk.Listbox(list_frame, font=("Cascadia Code", 10), selectmode="extended",
@@ -90,18 +97,9 @@ class PasswordEditorDialog(tk.Toplevel):
         self._listbox.pack(side=tk.LEFT, fill=tk.BOTH, expand=True)
         scroll.pack(side=tk.RIGHT, fill=tk.Y)
 
-        add_frame = ttk.Frame(self)
-        add_frame.pack(fill=tk.X, padx=12, pady=4)
-        ttk.Label(add_frame, text="新增").pack(side=tk.LEFT)
-        self._add_entry = ttk.Entry(add_frame, width=25)
-        self._add_entry.pack(side=tk.LEFT, fill=tk.X, expand=True, padx=8)
-        self._add_entry.bind("<Return>", lambda e: self._add_password())
-        ttk.Button(add_frame, text="添加", command=self._add_password).pack(side=tk.LEFT)
-
         btn_frame = ttk.Frame(self)
         btn_frame.pack(fill=tk.X, padx=12, pady=4)
         ttk.Button(btn_frame, text="删除选中", command=self._delete_selected).pack(side=tk.LEFT, padx=(0, 4))
-        ttk.Button(btn_frame, text="导入文件", command=self._import_file).pack(side=tk.LEFT, padx=4)
         ttk.Button(btn_frame, text="导出文件", command=self._export_file).pack(side=tk.LEFT, padx=4)
 
         self._status_label = ttk.Label(self, text="", foreground=C["mute"])
@@ -113,68 +111,43 @@ class PasswordEditorDialog(tk.Toplevel):
             self._on_change()
         self.destroy()
 
-    def _switch(self, mode):
-        self._mode.set(mode)
-        self._refresh_list()
-
     def _refresh_list(self):
         self._listbox.delete(0, tk.END)
-        if self._mode.get() == "builtin":
-            passwords = self._pm._builtin
-            self._tab_label.configure(text=f"内置密码 ({len(passwords)} 个)")
-        else:
-            passwords = self._pm._custom
-            self._tab_label.configure(text=f"自定义密码 ({len(passwords)} 个)")
-        for p in passwords:
-            display = p if p else "(空密码)"
-            self._listbox.insert(tk.END, display)
-        total = self._pm.total_count
-        self._status_label.configure(
-            text=f"共 {total} 个密码 (内置 {self._pm.builtin_count} + 自定义 {self._pm.custom_count})")
+        for p in self._pm.get_all_passwords():
+            self._listbox.insert(tk.END, p)
+        self._status_label.configure(text=f"共 {self._pm.total_count} 个密码")
 
-    def _add_password(self):
-        pwd = self._add_entry.get().strip()
-        if not pwd:
+    def _add_passwords(self):
+        text = self._add_text.get("1.0", "end-1c")
+        if not text.strip():
             return
-        if self._pm.add(pwd):
-            self._add_entry.delete(0, tk.END)
-            if self._mode.get() != "custom":
-                self._mode.set("custom")
+        added = self._pm.add_multiple(text)
+        if added:
+            self._add_text.delete("1.0", tk.END)
             self._refresh_list()
         else:
             messagebox.showinfo("提示", "密码已存在或无效", parent=self)
 
     def _delete_selected(self):
-        if self._mode.get() == "builtin":
-            messagebox.showinfo("提示", "内置密码不可删除，请切换到自定义密码", parent=self)
-            return
         selected = self._listbox.curselection()
         if not selected:
             return
+        passwords = self._pm.get_all_passwords()
         for idx in reversed(selected):
-            if 0 <= idx < len(self._pm._custom):
-                self._pm.remove(self._pm._custom[idx])
+            if 0 <= idx < len(passwords):
+                self._pm.remove(passwords[idx])
         self._refresh_list()
 
-    def _import_file(self):
-        path = filedialog.askopenfilename(parent=self, title="导入密码文件",
-                                          filetypes=[("文本文件", "*.txt"), ("所有文件", "*.*")])
-        if path:
-            count = self._pm.load_custom(path)
-            self._mode.set("custom")
-            self._refresh_list()
-            messagebox.showinfo("提示", f"已导入 {count} 个密码", parent=self)
-
     def _export_file(self):
-        path = filedialog.asksaveasfilename(parent=self, title="导出自定义密码",
+        path = filedialog.asksaveasfilename(parent=self, title="导出密码",
                                             defaultextension=".txt",
                                             filetypes=[("文本文件", "*.txt")])
         if path:
-            count = self._pm.save_custom(path)
+            count = self._pm.save(path)
             if count > 0:
-                messagebox.showinfo("提示", f"已导出 {count} 个自定义密码", parent=self)
+                messagebox.showinfo("提示", f"已导出 {count} 个密码", parent=self)
             else:
-                messagebox.showinfo("提示", "自定义密码为空，未导出", parent=self)
+                messagebox.showinfo("提示", "密码列表为空，未导出", parent=self)
 
 
 class SmartExtractorApp:
@@ -188,13 +161,11 @@ class SmartExtractorApp:
         self._completed: list[ArchiveFileItem] = []
         self._output_dir = Path.home() / "Extracted"
         self._password_manager = PasswordManager()
-        # Store passwords next to the exe (PyInstaller) or in project root (source)
         if getattr(sys, "frozen", False):
-            _exe_dir = Path(sys.executable).resolve().parent
+            self._password_file = Path(os.environ["APPDATA"]) / "Smart Archive Extractor" / "passwords.txt"
         else:
-            _exe_dir = Path(__file__).resolve().parent.parent
-        self._password_file = _exe_dir / "passwords.txt"
-        self._pwdfile_var = tk.StringVar()
+            self._password_file = Path(__file__).resolve().parent.parent / "passwords.txt"
+        self._password_manager.set_persistence(self._password_file)
         self._auto_rename = tk.BooleanVar(value=True)
         self._auto_password = tk.BooleanVar(value=True)
         self._delete_mode = tk.StringVar(value="none")  # "none" | "delete" | "recycle"
@@ -315,10 +286,8 @@ class SmartExtractorApp:
         row2 = ttk.Frame(opt_frame)
         row2.pack(fill=tk.X, pady=6)
         ttk.Label(row2, text="密码字典").pack(side=tk.LEFT)
-        ttk.Entry(row2, textvariable=self._pwdfile_var, width=42).pack(side=tk.LEFT, fill=tk.X, expand=True, padx=8)
-        ttk.Button(row2, text="浏览", command=self._browse_password_file).pack(side=tk.LEFT)
-        ttk.Button(row2, text="编辑", command=self._open_password_editor).pack(side=tk.LEFT, padx=(4, 0))
-        ttk.Button(row2, text="导出", command=self._export_default_pwd).pack(side=tk.LEFT, padx=(4, 0))
+        ttk.Button(row2, text="编辑", command=self._open_password_editor).pack(side=tk.LEFT, padx=(8, 4))
+        ttk.Button(row2, text="导出", command=self._export_passwords).pack(side=tk.LEFT, padx=4)
 
         row3 = ttk.Frame(opt_frame)
         row3.pack(fill=tk.X, pady=6)
@@ -707,50 +676,39 @@ class SmartExtractorApp:
             self._output_dir = Path(path)
             self._output_var.set(str(self._output_dir))
 
-    def _browse_password_file(self):
-        path = filedialog.askopenfilename(title="选择密码字典文件",
-                                          filetypes=[("文本文件", "*.txt"), ("所有文件", "*.*")])
-        if path:
-            self._pwdfile_var.set(path)
-            count = self._password_manager.load_custom(path)
-            self._update_pwd_count_display()
-            self._logger.log(f"已加载 {count} 个自定义密码")
-            self._save_persistent_passwords()
-
     def _open_password_editor(self):
         PasswordEditorDialog(self.root, self._password_manager,
                              app_colors=self._C,
-                             on_change=self._save_persistent_passwords)
+                             on_change=lambda: None)
         self._update_pwd_count_display()
 
-    def _export_default_pwd(self):
-        path = filedialog.asksaveasfilename(title="导出默认密码字典", defaultextension=".txt",
+    def _export_passwords(self):
+        path = filedialog.asksaveasfilename(title="导出密码", defaultextension=".txt",
                                             filetypes=[("文本文件", "*.txt")])
         if path:
-            save_builtin_passwords(path)
-            self._logger.log(f"默认密码字典已导出到: {path}")
+            count = self._password_manager.save(path)
+            if count > 0:
+                self._logger.log(f"密码已导出到: {path} ({count} 个)")
+            else:
+                self._logger.log("密码列表为空，未导出")
 
     def _load_persistent_passwords(self):
-        """Auto-load custom passwords from passwords.txt on startup."""
+        """Auto-load passwords on startup."""
         if self._password_file.is_file():
-            count = self._password_manager.load_custom(self._password_file)
+            count = self._password_manager.load()
             if count:
-                self._pwdfile_var.set(str(self._password_file))
+                self._logger.log(f"已加载 {count} 个密码")
 
     def _save_persistent_passwords(self):
-        """Save custom passwords to passwords.txt."""
-        if self._password_manager.custom_count > 0:
-            self._password_manager.save_custom(self._password_file)
-            self._pwdfile_var.set(str(self._password_file))
+        """Save passwords (called automatically by PasswordManager on add/remove)."""
+        pass
 
     def _update_pwd_count_display(self):
         total = self._password_manager.total_count
-        custom = self._password_manager.custom_count
-        if custom:
-            self._pwd_count_label.configure(
-                text=f"(内置{self._password_manager.builtin_count} + 自定义{custom} = {total}个密码)")
+        if total:
+            self._pwd_count_label.configure(text=f"({total} 个密码)")
         else:
-            self._pwd_count_label.configure(text=f"(内置 {self._password_manager.builtin_count} 个密码)")
+            self._pwd_count_label.configure(text="(暂无密码)")
 
     # ============================================================
     #  Extraction flow
@@ -1227,7 +1185,6 @@ class SmartExtractorApp:
         if fail_count == 0 and done_count > 0:
             self._progress.configure(value=100)
         if self._open_after.get() and done_count > 0:
-            import os
             last = next((f for f in reversed(self._completed) if f.status == "done"), None)
             if last and last.output_path:
                 os.startfile(last.output_path)
