@@ -69,17 +69,32 @@ python main.py       # 控制台启动（调试用）
 # 或双击 main.pyw    # 无控制台启动（推荐）
 ```
 
-### 方式二：打包的 EXE
+### 方式二：预打包版本（GitHub Releases）
 
-使用 PyInstaller 打包为独立可执行文件（无需安装 Python）：
+从 [Releases](https://github.com/Adnixzhong/Smart-Archive-Extractord/releases) 下载，三个版本可选：
+
+| 版本 | 大小 | 说明 |
+|------|------|------|
+| `Smart Archive Extractor (PyInstaller).exe` | ~14 MB | PyInstaller 单文件，分发最方便 |
+| `Smart Archive Extractor (Nuitka).exe` | ~27 MB | Nuitka 单文件，C 编译，启动较快 |
+| `Smart Archive Extractor (Nuitka 便携版).zip` | ~11 MB | Nuitka 文件夹版，解压即用，启动最快 |
+
+### 方式三：自行打包
 
 ```bash
+# PyInstaller
 pip install PyInstaller
 pyinstaller --onefile --windowed --name "Smart Archive Extractor" main.py
-# 输出在 dist/Smart Archive Extractor.exe
+
+# Nuitka 单文件
+pip install nuitka
+python -m nuitka --onefile --windows-console-mode=disable --enable-plugin=tk-inter main.py
+
+# Nuitka 便携版
+python -m nuitka --standalone --windows-console-mode=disable --enable-plugin=tk-inter main.py
 ```
 
-**注意**：打包后的 EXE 仍需要目标机器安装 7-Zip。
+**注意**：打包后的 EXE 仍需要目标机器安装 7-Zip。exe 版密码自动保存到 `%APPDATA%\Smart Archive Extractor\passwords.txt`。
 
 ## 使用说明
 
