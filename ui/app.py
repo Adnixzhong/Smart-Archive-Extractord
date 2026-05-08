@@ -180,6 +180,7 @@ class SmartExtractorApp:
         self._auto_password = tk.BooleanVar(value=True)
         self._delete_mode = tk.StringVar(value="none")  # "none" | "delete" | "recycle"
         self._wrap_folder = tk.BooleanVar(value=True)
+        self._open_after = tk.BooleanVar(value=False)
         self._cancel_flag = threading.Event()
         self._current_thread: threading.Thread | None = None
         self._theme = tk.StringVar(value="system")
@@ -311,7 +312,8 @@ class SmartExtractorApp:
         ttk.Label(row5, text="解压后:").pack(side=tk.LEFT)
         ttk.Radiobutton(row5, text="保留压缩包", variable=self._delete_mode, value="none").pack(side=tk.LEFT, padx=(5, 10))
         ttk.Radiobutton(row5, text="移到回收站", variable=self._delete_mode, value="recycle").pack(side=tk.LEFT, padx=(0, 10))
-        ttk.Radiobutton(row5, text="直接删除", variable=self._delete_mode, value="delete").pack(side=tk.LEFT)
+        ttk.Radiobutton(row5, text="直接删除", variable=self._delete_mode, value="delete").pack(side=tk.LEFT, padx=(0, 15))
+        ttk.Checkbutton(row5, text="解压完成后打开文件夹", variable=self._open_after).pack(side=tk.LEFT)
 
         # --- Progress bar ---
         self._progress = ttk.Progressbar(self.root, mode="determinate", length=400)
@@ -1019,6 +1021,30 @@ class SmartExtractorApp:
                 self._delete_archive_files(first_vol)
             self._check_smart_nested(str(nest_output), nested_pwd or parent_password)
 
+    def _flatten_and_clean(self, output_dir: str):
+        """Collapse single-folder wrappers and delete leftover archives recursively."""
+        path = Path(output_dir)
+        changed = True
+        while changed:
+            changed = False
+            # Delete any remaining archive files (e.g. missed inner archives)
+            for f in sorted(path.iterdir()):
+                if f.is_file() and detect(f) is not None:
+                    self._ui_log(f"  [清理] 删除残留: {f.name}")
+                    self._delete_archive_files(f)
+
+            # If there's exactly one folder and nothing else, collapse it
+            contents = list(path.iterdir())
+            dirs = [d for d in contents if d.is_dir()]
+            files = [f for f in contents if f.is_file()]
+            if len(dirs) == 1 and len(files) == 0:
+                inner = dirs[0]
+                self._ui_log(f"  [展平] {inner.name}/ → {path.name}/")
+                for item in inner.iterdir():
+                    item.rename(path / item.name)
+                inner.rmdir()
+                changed = True
+
     def _process_nested_dir(self, dirpath: str, parent_password: str | None):
         """Scan a directory for archives and extract them."""
         nested = scan_for_archives(dirpath)
@@ -1106,6 +1132,8 @@ class SmartExtractorApp:
             # Step 5: Smart nested detection
             if item.status == "done":
                 self._check_smart_nested(item_output, parent_pwd)
+                # Flatten single-folder wrappers and clean leftover archives
+                self._flatten_and_clean(item_output)
 
         self.root.after(0, self._on_extraction_done)
 
@@ -1118,6 +1146,11 @@ class SmartExtractorApp:
         self._refresh_status()
         if fail_count == 0 and done_count > 0:
             self._progress.configure(value=100)
+        if self._open_after.get() and done_count > 0:
+            import os
+            last = next((f for f in reversed(self._completed) if f.status == "done"), None)
+            if last and last.output_path:
+                os.startfile(last.output_path)
 
     # ============================================================
     #  UI helpers
