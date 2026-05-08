@@ -162,7 +162,14 @@ class SmartExtractorApp:
         self._output_dir = Path.home() / "Extracted"
         self._password_manager = PasswordManager()
         if getattr(sys, "frozen", False):
-            self._password_file = Path(os.environ["APPDATA"]) / "Smart Archive Extractor" / "passwords.txt"
+            exe_dir = Path(sys.executable).resolve().parent
+            # Standalone/portable has companion DLLs → store next to exe
+            # Onefile is a lone exe → store in AppData
+            companion_files = list(exe_dir.glob("*.dll")) + list(exe_dir.glob("*.pyd"))
+            if companion_files:
+                self._password_file = exe_dir / "passwords.txt"
+            else:
+                self._password_file = Path(os.environ["APPDATA"]) / "Smart Archive Extractor" / "passwords.txt"
         else:
             self._password_file = Path(__file__).resolve().parent.parent / "passwords.txt"
         self._password_manager.set_persistence(self._password_file)

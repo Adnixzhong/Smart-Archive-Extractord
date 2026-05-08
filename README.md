@@ -7,7 +7,10 @@
 - **魔数格式检测** — 读取文件头二进制签名识别真实格式（ZIP/RAR/7z/TAR/GZ/BZ2/XZ/ZST/CAB/ISO/ARJ/LZH/LZ4），不依赖文件后缀名
 - **后缀名自动修正** — 检测到错误后缀名时自动重命名为正确后缀，分卷文件（.001/.r00/.part1.rar）不会被误改名
 - **分卷解压** — 自动识别并合并 .part1.rar / .r00 / .zip.001 / .7z.001 等分卷压缩包
-- **密码字典** — 支持多行批量粘贴密码，自动持久化（exe 版存 `%APPDATA%\Smart Archive Extractor\`，源码版存项目根目录），按文件单独设置密码
+- **密码字典** — 支持多行批量粘贴密码，自动持久化
+  - 单文件版 (PyInstaller / Nuitka) → `%APPDATA%\Smart Archive Extractor\passwords.txt`
+  - Nuitka 便携版 → exe 同目录 `passwords.txt`
+  - 源码版 → 项目根目录 `passwords.txt`
 - **智能嵌套解压** — 解压后全自动检测：
   - 单文件夹内含单个压缩包 → 自动解压（继承上级密码）
   - 多文件/文件夹结构 → 自动扫描并解压所有内部压缩包
@@ -94,7 +97,7 @@ python -m nuitka --onefile --windows-console-mode=disable --enable-plugin=tk-int
 python -m nuitka --standalone --windows-console-mode=disable --enable-plugin=tk-inter main.py
 ```
 
-**注意**：打包后的 EXE 仍需要目标机器安装 7-Zip。exe 版密码自动保存到 `%APPDATA%\Smart Archive Extractor\passwords.txt`。
+**注意**：打包后的 EXE 仍需要目标机器安装 7-Zip。密码存储：单文件版 → `%APPDATA%\Smart Archive Extractor\`，便携版 → exe 同目录。
 
 ## 使用说明
 
@@ -113,7 +116,7 @@ python -m nuitka --standalone --windows-console-mode=disable --enable-plugin=tk-
 2. 无密码尝试
 3. 密码字典（跳过已尝试的和上级密码）
 
-密码自动持久化：exe 版存 `%APPDATA%\Smart Archive Extractor\passwords.txt`，源码版存项目根目录。
+密码存储位置：单文件版 (PyInstaller/Nuitka) → `%APPDATA%\Smart Archive Extractor\`，Nuitka 便携版 → exe 同目录，源码版 → 项目根目录。
 
 嵌套压缩包会优先尝试上级压缩包的密码（通常同一套密码）。
 
