@@ -7,6 +7,7 @@ from tkinter import ttk, filedialog, messagebox, simpledialog
 from pathlib import Path
 import threading
 import re
+import time
 import ctypes
 
 import windnd
@@ -159,6 +160,7 @@ class SmartExtractorApp:
 
         self._files: list[ArchiveFileItem] = []
         self._completed: list[ArchiveFileItem] = []
+        self._recycled_items: list[tuple[str, float]] = []  # (original_path, timestamp)
         self._output_dir = Path.home() / "Extracted"
         self._password_manager = PasswordManager()
         if getattr(sys, "frozen", False):
@@ -260,15 +262,6 @@ class SmartExtractorApp:
         self._tree_done.pack(side=tk.LEFT, fill=tk.BOTH, expand=True)
         d_scroll.pack(side=tk.RIGHT, fill=tk.Y)
 
-        # Right-click menu for completed
-        self._done_menu = tk.Menu(self.root, tearoff=0,
-                                  bg=self._C["elevated"], fg=self._C["body"],
-                                  activebackground=self._C["card"], activeforeground=self._C["ink"],
-                                  borderwidth=1, relief="solid",
-                                  font=("Segoe UI", 10))
-        self._done_menu.add_command(label="还原到待解压", command=self._restore_selected)
-        self._tree_done.bind("<Button-3>", self._on_done_right_click)
-
         # --- Toolbar below panels ---
         toolbar = ttk.Frame(self.root)
         toolbar.pack(fill=tk.X, padx=12, pady=(0, 8))
@@ -276,7 +269,7 @@ class SmartExtractorApp:
         ttk.Button(toolbar, text="添加文件夹", command=self._add_directory).pack(side=tk.LEFT, padx=4)
         ttk.Button(toolbar, text="移除选中", command=self._remove_selected).pack(side=tk.LEFT, padx=4)
         ttk.Button(toolbar, text="清空列表", command=self._clear_pending).pack(side=tk.LEFT, padx=4)
-        ttk.Button(toolbar, text="还原选中", command=self._restore_selected).pack(side=tk.LEFT, padx=4)
+        ttk.Button(toolbar, text="从回收站还原", command=self._open_recycle_restore).pack(side=tk.LEFT, padx=4)
         ttk.Button(toolbar, text="清空已完成", command=self._clear_completed).pack(side=tk.LEFT, padx=4)
 
         # --- Options panel ---
@@ -645,34 +638,6 @@ class SmartExtractorApp:
                 self._files[idx].specific_password = ""
         self._refresh_pending_list()
 
-    def _on_done_right_click(self, event):
-        iid = self._tree_done.identify_row(event.y)
-        if iid:
-            if iid not in self._tree_done.selection():
-                self._tree_done.selection_set(iid)
-            self._done_menu.post(event.x_root, event.y_root)
-
-    def _restore_selected(self):
-        """Move selected items from completed back to pending."""
-        selected = self._tree_done.selection()
-        if not selected:
-            return
-        indices = sorted([int(self._tree_done.index(iid)) for iid in selected], reverse=True)
-        restored = 0
-        for i in indices:
-            if 0 <= i < len(self._completed):
-                item = self._completed.pop(i)
-                item.status = "pending"
-                item.error_msg = ""
-                item.output_path = ""
-                self._files.append(item)
-                restored += 1
-        if restored:
-            self._ui_log(f"已还原 {restored} 个文件到待解压列表")
-        self._refresh_pending_list()
-        self._refresh_completed_list()
-        self._refresh_status()
-
     # ============================================================
     #  Options
     # ============================================================
@@ -765,35 +730,25 @@ class SmartExtractorApp:
             path_str = str(filepath.resolve())
             # SHFileOperationW expects double-null-terminated string
             buf = ctypes.create_unicode_buffer(path_str + "\0\0")
-            op = ctypes.c_int(0)
-            # FO_DELETE=3, FOF_ALLOWUNDO=0x40, FOF_WANTNUKEWARNING=0x4000
-            result = ctypes.windll.shell32.SHFileOperationW(
-                ctypes.byref(ctypes.c_uint(0)),  # hwnd
-                op,                               # wFunc (unused by SHFileOperationW)
-                ctypes.byref(ctypes.c_wchar_p(path_str)) if False else None,  # pFrom
-                None,                             # pTo
-                0x40 | 0x4000                     # fFlags: allow undo + no confirmation
-            )
-            # Correct way:
-            import struct
-            from ctypes import wintypes
+
             class SHFILEOPSTRUCTW(ctypes.Structure):
                 _fields_ = [
-                    ("hwnd", wintypes.HWND),
+                    ("hwnd", ctypes.c_void_p),
                     ("wFunc", ctypes.c_uint),
                     ("pFrom", ctypes.c_wchar_p),
                     ("pTo", ctypes.c_wchar_p),
                     ("fFlags", ctypes.c_ushort),
-                    ("fAnyOperationsAborted", wintypes.BOOL),
+                    ("fAnyOperationsAborted", ctypes.c_int),
                     ("hNameMappings", ctypes.c_void_p),
                     ("lpszProgressTitle", ctypes.c_wchar_p),
                 ]
+
             fop = SHFILEOPSTRUCTW()
-            fop.hwnd = 0
+            fop.hwnd = None
             fop.wFunc = 3  # FO_DELETE
-            fop.pFrom = buf
+            fop.pFrom = ctypes.cast(buf, ctypes.c_wchar_p)
             fop.pTo = None
-            fop.fFlags = 0x0040  # FOF_ALLOWUNDO
+            fop.fFlags = 0x0040 | 0x0010 | 0x0400  # FOF_ALLOWUNDO | FOF_NOCONFIRMATION | FOF_NOERRORUI
             result = ctypes.windll.shell32.SHFileOperationW(ctypes.byref(fop))
             return result == 0 and not fop.fAnyOperationsAborted
         except Exception:
@@ -937,15 +892,44 @@ class SmartExtractorApp:
     #  Smart nested detection
     # ============================================================
 
-    def _check_smart_nested(self, output_dir: str, parent_password: str | None):
+    def _check_smart_nested(self, output_dir: str, parent_password: str | None,
+                            skip_files: set | None = None) -> list[Path]:
         """Check extraction result. Auto-extract single wrapped archive,
-        ask user for complex structures."""
+        scan for nested archives. Returns list of extracted archive paths to delete."""
         out_path = Path(output_dir)
         if not out_path.is_dir():
-            return
+            return []
         contents = list(out_path.iterdir())
+        if not contents:
+            return []
+
+        skip = skip_files or set()
+        files_in_root = [f for f in contents if f.is_file() and f.resolve() not in skip]
+        dirs_in_root = [d for d in contents if d.is_dir()]
+
+        to_delete: list[Path] = []
+
+        # Case 1: Single archive file directly in output → auto-extract
+        if len(files_in_root) == 1 and len(dirs_in_root) == 0:
+            sole = files_in_root[0]
+            if detect(sole) is not None:
+                self._ui_log(f"  [智能] 检测到嵌套归档: {sole.name}")
+                to_delete.extend(self._process_single_nested(sole, parent_password, skip_files=skip))
+                return to_delete
+
+        # Case 2: Archive files among multiple items (e.g. wrap_folder=False)
+        for f in files_in_root:
+            if self._cancel_flag.is_set():
+                break
+            if detect(f) is not None:
+                self._ui_log(f"  [智能] 检测到嵌套归档: {f.name}")
+                to_delete.extend(self._process_single_nested(f, parent_password, skip_files=skip))
+        if to_delete:
+            return to_delete
+
+        # Case 3: Single directory wrapper
         if len(contents) != 1 or not contents[0].is_dir():
-            return  # multiple files or empty — nothing to auto-detect
+            return []
 
         inner_dir = contents[0]
         inner_files = [f for f in inner_dir.iterdir() if f.is_file()]
@@ -956,11 +940,10 @@ class SmartExtractorApp:
             sole = inner_files[0]
             if detect(sole) is not None:
                 self._ui_log(f"  [智能] 检测到嵌套归档: {inner_dir.name}/{sole.name}")
-                self._process_single_nested(sole, parent_password)
-                return
+                to_delete.extend(self._process_single_nested(sole, parent_password, skip_files=skip))
 
         # Pattern B: complex structure → auto-scan for archives
-        if len(inner_files) > 0 or len(inner_dirs) > 0:
+        elif len(inner_files) > 0 or len(inner_dirs) > 0:
             self._ui_log(f"  [嵌套] {out_path.name}/{inner_dir.name}/ 内含:")
             for f in inner_files:
                 fmt = detect(f)
@@ -968,15 +951,18 @@ class SmartExtractorApp:
                 self._ui_log(f"    - {f.name}{tag}")
             for d in inner_dirs:
                 self._ui_log(f"    - {d.name}/")
-            self._process_nested_dir(str(inner_dir), parent_password)
+            to_delete.extend(self._process_nested_dir(str(inner_dir), parent_password, skip_files=skip))
 
-    def _process_single_nested(self, filepath: Path, parent_password: str | None):
-        """Extract a single nested archive file."""
+        return to_delete
+
+    def _process_single_nested(self, filepath: Path, parent_password: str | None,
+                               skip_files: set | None = None) -> list[Path]:
+        """Extract a single nested archive file. Returns list of archive paths to delete."""
         if self._cancel_flag.is_set():
-            return
+            return []
         fmt = detect_with_tar_combo(filepath)
         if fmt is None:
-            return
+            return []
         self._ui_log(f"    → {filepath.name} [{fmt.name}]")
 
         working = filepath
@@ -1061,45 +1047,72 @@ class SmartExtractorApp:
             if not success:
                 self._ui_log(f"      ⚠ 密码字典未匹配")
 
+        to_delete: list[Path] = []
+
         if success:
-            if (self._delete_mode.get() != "none"):
-                self._delete_archive_files(first_vol)
-            self._check_smart_nested(str(nest_output), nested_pwd or parent_password)
+            # Merge incoming skip_files with the archive we just extracted
+            inherited_skip = (skip_files or set()) | {first_vol.resolve()}
+            to_delete.extend(self._check_smart_nested(
+                str(nest_output), nested_pwd or parent_password, skip_files=inherited_skip))
+            # Flatten nested output
+            self._flatten_and_clean(str(nest_output))
+            # Defer deletion: return archive paths for later deletion
+            if is_split_archive(working):
+                to_delete.extend([v for v in find_volumes(working) if v.exists()])
+            elif working.exists():
+                to_delete.append(working)
+
+        return to_delete
 
     def _flatten_and_clean(self, output_dir: str):
-        """Collapse single-folder wrappers and delete leftover archives recursively."""
+        """Collapse single-folder wrappers recursively (bottom-up)."""
         path = Path(output_dir)
+        if not path.is_dir():
+            return
         changed = True
         while changed:
             changed = False
-            # Delete any remaining archive files (e.g. missed inner archives)
-            for f in sorted(path.iterdir()):
-                if f.is_file() and detect(f) is not None:
-                    self._ui_log(f"  [清理] 删除残留: {f.name}")
-                    self._delete_archive_files(f)
-
-            # If there's exactly one folder and nothing else, collapse it
             contents = list(path.iterdir())
             dirs = [d for d in contents if d.is_dir()]
-            files = [f for f in contents if f.is_file()]
-            if len(dirs) == 1 and len(files) == 0:
-                inner = dirs[0]
-                self._ui_log(f"  [展平] {inner.name}/ → {path.name}/")
-                for item in inner.iterdir():
-                    item.rename(path / item.name)
-                inner.rmdir()
-                changed = True
 
-    def _process_nested_dir(self, dirpath: str, parent_password: str | None):
-        """Scan a directory for archives and extract them."""
+            # Recurse into subdirectories first (bottom-up)
+            for d in sorted(dirs):
+                self._flatten_and_clean(str(d))
+
+            # Re-read after recursion may have collapsed subdirectories
+            contents = list(path.iterdir())
+            dirs = [d for d in contents if d.is_dir()]
+
+            # If exactly one directory, collapse it (even if files are present)
+            if len(dirs) == 1:
+                inner = dirs[0]
+                moved = 0
+                for item in inner.iterdir():
+                    target = path / item.name
+                    if not target.exists():
+                        item.rename(target)
+                        moved += 1
+                try:
+                    inner.rmdir()
+                except OSError:
+                    pass
+                if moved > 0:
+                    self._ui_log(f"  [展平] {inner.name}/ → {path.name}/")
+                    changed = True
+
+    def _process_nested_dir(self, dirpath: str, parent_password: str | None,
+                            skip_files: set | None = None) -> list[Path]:
+        """Scan a directory for archives and extract them. Returns list of archive paths to delete."""
         nested = scan_for_archives(dirpath)
         if not nested:
-            return
+            return []
         self._ui_log(f"  [嵌套处理] 发现 {len(nested)} 个压缩包")
+        to_delete: list[Path] = []
         for npath in nested:
             if self._cancel_flag.is_set():
-                return
-            self._process_single_nested(npath, parent_password)
+                break
+            to_delete.extend(self._process_single_nested(npath, parent_password, skip_files=skip_files))
+        return to_delete
 
     # ============================================================
     #  Extraction worker
@@ -1108,6 +1121,8 @@ class SmartExtractorApp:
     def _extraction_worker(self, output: Path):
         # Iterate a snapshot since we mutate self._files during the loop
         snapshot = list(self._files)
+        all_to_delete: list[Path] = []
+
         for i, item in enumerate(snapshot):
             if self._cancel_flag.is_set():
                 break
@@ -1158,13 +1173,19 @@ class SmartExtractorApp:
                     else:
                         self._ui_log(f"  ⚠ 目标文件已存在，跳过改名")
 
-            # Step 4: Extract
+            # Step 4: Snapshot pre-existing files BEFORE extraction (for wrap_folder=False)
+            pre_output = item.path.parent / item.path.stem if self._wrap_folder.get() else item.path.parent
+            pre_existing = {p.resolve() for p in pre_output.iterdir()} if pre_output.is_dir() else set()
+
             item_output, parent_pwd = self._extract_one(first_vol, item, output)
             item.output_path = item_output
 
-            # Delete archive after successful extraction
-            if item.status == "done" and (self._delete_mode.get() != "none"):
-                self._delete_archive_files(first_vol)
+            # Step 5: Collect outer archive paths for deferred deletion
+            if item.status == "done" and self._delete_mode.get() != "none":
+                if is_split_archive(archive_path):
+                    all_to_delete.extend([v for v in find_volumes(archive_path) if v.exists()])
+                elif archive_path.exists():
+                    all_to_delete.append(archive_path)
 
             # Move to completed
             if item.status in ("done", "error"):
@@ -1174,11 +1195,32 @@ class SmartExtractorApp:
             self._ui_update_all()
             self.root.after(0, lambda: self._progress.configure(value=0))
 
-            # Step 5: Smart nested detection
+            # Step 6: Smart nested detection (skip pre-existing files)
             if item.status == "done":
-                self._check_smart_nested(item_output, parent_pwd)
-                # Flatten single-folder wrappers and clean leftover archives
+                all_to_delete.extend(self._check_smart_nested(item_output, parent_pwd,
+                                                               skip_files=pre_existing))
+                # Flatten output tree recursively
                 self._flatten_and_clean(item_output)
+
+        # Step 7: Delete all successfully extracted archives (outer + nested)
+        if all_to_delete and self._delete_mode.get() != "none":
+            self._ui_log("")
+            self._ui_log(f"清理压缩包 ({len(all_to_delete)} 个)...")
+            for p in sorted(set(all_to_delete), key=lambda x: str(x)):
+                if not p.exists() or self._cancel_flag.is_set():
+                    continue
+                if self._delete_mode.get() == "recycle":
+                    if self._recycle_file(p):
+                        self._ui_log(f"  已移到回收站: {p.name}")
+                        self._recycled_items.append((str(p.resolve()), time.time()))
+                    else:
+                        self._ui_log(f"  ⚠ 回收失败: {p.name}")
+                elif self._delete_mode.get() == "delete":
+                    try:
+                        p.unlink()
+                        self._ui_log(f"  已删除: {p.name}")
+                    except OSError as e:
+                        self._ui_log(f"  ⚠ 删除失败: {p.name} - {e}")
 
         self.root.after(0, self._on_extraction_done)
 
@@ -1196,6 +1238,19 @@ class SmartExtractorApp:
             if last and last.output_path:
                 os.startfile(last.output_path)
 
+    def _open_recycle_restore(self):
+        """Open the recycle bin restore dialog."""
+        if not self._recycled_items:
+            messagebox.showinfo("提示", "当前没有回收站记录", parent=self.root)
+            return
+        RecycleBinRestoreDialog(self.root, self._recycled_items,
+                                app_colors=self._C,
+                                on_restore=self._on_recycled_items_changed)
+
+    def _on_recycled_items_changed(self, remaining):
+        """Callback when recycle items list is modified by restore dialog."""
+        self._recycled_items[:] = remaining
+
     # ============================================================
     #  UI helpers
     # ============================================================
@@ -1207,6 +1262,207 @@ class SmartExtractorApp:
         self.root.after(0, self._refresh_pending_list)
         self.root.after(0, self._refresh_completed_list)
         self.root.after(0, self._refresh_status)
+
+
+class RecycleBinRestoreDialog(tk.Toplevel):
+    """Dialog to restore files from Windows Recycle Bin."""
+
+    def __init__(self, parent, recycled_items: list, *,
+                 app_colors=None, on_restore=None):
+        super().__init__(parent)
+        self.title("从回收站还原")
+        self.geometry("650x420")
+        self.minsize(500, 300)
+        self._C = app_colors or {"canvas": "#15181d", "surface": "#1c2026",
+                                  "elevated": "#22262d", "card": "#292d35",
+                                  "hairline": "#343840", "ink": "#e8eaed",
+                                  "body": "#b8bcc4", "mute": "#8a8f98",
+                                  "blue": "#5dade2", "green": "#58d68d",
+                                  "red": "#ec7063"}
+        self.configure(bg=self._C["canvas"])
+        self._items = recycled_items  # list of (path_str, timestamp)
+        self._on_restore = on_restore
+        self._check_vars: list[tk.BooleanVar] = []
+        self.transient(parent)
+        self.grab_set()
+        self._build_ui()
+        self._populate()
+
+    def _build_ui(self):
+        C = self._C
+        ttk.Label(self, text="以下文件已被本软件移入回收站，选中后点「还原」恢复：",
+                  font=("Segoe UI", 10)).pack(fill=tk.X, padx=12, pady=(12, 8))
+
+        tree_frame = ttk.Frame(self)
+        tree_frame.pack(fill=tk.BOTH, expand=True, padx=12, pady=4)
+
+        self._tree = ttk.Treeview(tree_frame,
+                                  columns=("文件名", "原始路径", "删除时间"),
+                                  show="headings", selectmode="extended")
+        self._tree.column("文件名", width=180)
+        self._tree.column("原始路径", width=280)
+        self._tree.column("删除时间", width=140)
+        self._tree.heading("文件名", text="文件名")
+        self._tree.heading("原始路径", text="原始路径")
+        self._tree.heading("删除时间", text="删除时间")
+
+        scroll = ttk.Scrollbar(tree_frame, orient=tk.VERTICAL, command=self._tree.yview)
+        self._tree.configure(yscrollcommand=scroll.set)
+        self._tree.pack(side=tk.LEFT, fill=tk.BOTH, expand=True)
+        scroll.pack(side=tk.RIGHT, fill=tk.Y)
+
+        self._status_label = ttk.Label(self, text="", foreground=C["mute"])
+        self._status_label.pack(fill=tk.X, padx=12, pady=(4, 8))
+
+        btn_frame = ttk.Frame(self)
+        btn_frame.pack(fill=tk.X, padx=12, pady=(0, 12))
+        ttk.Button(btn_frame, text="全选", command=self._select_all).pack(side=tk.LEFT, padx=(0, 4))
+        ttk.Button(btn_frame, text="取消全选", command=self._deselect_all).pack(side=tk.LEFT, padx=4)
+        ttk.Button(btn_frame, text="还原选中", command=self._restore_selected).pack(side=tk.LEFT, padx=4)
+        ttk.Button(btn_frame, text="关闭", command=self._close).pack(side=tk.RIGHT, padx=4)
+
+    def _populate(self):
+        from datetime import datetime
+        self._tree.delete(*self._tree.get_children())
+        for path_str, ts in self._items:
+            p = Path(path_str)
+            dt = datetime.fromtimestamp(ts).strftime("%Y-%m-%d %H:%M:%S")
+            self._tree.insert("", "end", values=(p.name, str(p.parent), dt))
+        self._status_label.configure(text=f"共 {len(self._items)} 条记录")
+
+    def _close(self):
+        self.destroy()
+
+    def _select_all(self):
+        self._tree.selection_set(self._tree.get_children())
+
+    def _deselect_all(self):
+        self._tree.selection_set()
+
+    def _get_user_sid(self) -> str | None:
+        """Get the current user's SID string."""
+        import ctypes.wintypes
+        name = ctypes.create_unicode_buffer(256)
+        name_size = ctypes.wintypes.DWORD(256)
+        if not ctypes.windll.advapi32.GetUserNameW(name, ctypes.byref(name_size)):
+            return None
+        sid_size = ctypes.wintypes.DWORD(0)
+        dom_size = ctypes.wintypes.DWORD(0)
+        sid_use = ctypes.c_int()
+        ctypes.windll.advapi32.LookupAccountNameW(
+            None, name, None, ctypes.byref(sid_size),
+            None, ctypes.byref(dom_size), ctypes.byref(sid_use))
+        sid = ctypes.create_string_buffer(sid_size.value)
+        domain = ctypes.create_unicode_buffer(dom_size.value)
+        if not ctypes.windll.advapi32.LookupAccountNameW(
+                None, name, sid, ctypes.byref(sid_size),
+                domain, ctypes.byref(dom_size), ctypes.byref(sid_use)):
+            return None
+        sid_str = ctypes.c_wchar_p()
+        if not ctypes.windll.advapi32.ConvertSidToStringSidW(sid, ctypes.byref(sid_str)):
+            return None
+        return sid_str.value
+
+    def _scan_recycle_bin(self, target_paths: set) -> dict:
+        """Scan recycle bin. Returns {original_path: r_file_path} for matches."""
+        sid = self._get_user_sid()
+        if not sid:
+            return {}
+        rb_dir = Path(f"C:/$Recycle.Bin/{sid}")
+        if not rb_dir.is_dir():
+            return {}
+        import struct
+        matches = {}
+        for f in rb_dir.iterdir():
+            if not f.name.startswith("$I"):
+                continue
+            try:
+                data = f.read_bytes()
+                if len(data) < 28:
+                    continue
+                header = struct.unpack_from("<Q", data, 0)[0]
+                if header != 2:
+                    continue
+                path_len = struct.unpack_from("<I", data, 24)[0]
+                if 28 + path_len * 2 > len(data):
+                    continue
+                raw = data[28:28 + path_len * 2]
+                orig = raw.decode("utf-16-le")
+                norm = str(Path(orig).resolve())
+                if norm in target_paths:
+                    r_file = rb_dir / ("$R" + f.name[2:])
+                    if r_file.is_file():
+                        matches[norm] = r_file
+            except Exception:
+                continue
+        return matches
+
+    def _restore_selected(self):
+        selected = self._tree.selection()
+        if not selected:
+            return
+        indices = sorted([int(self._tree.index(iid)) for iid in selected])
+        target_paths = {str(Path(self._items[i][0]).resolve()) for i in indices if 0 <= i < len(self._items)}
+        matches = self._scan_recycle_bin(target_paths)
+
+        restored_indices = set()
+        failed = 0
+        for idx in reversed(indices):
+            if idx < 0 or idx >= len(self._items):
+                continue
+            path_str, ts = self._items[idx]
+            norm = str(Path(path_str).resolve())
+            r_file = matches.get(norm)
+            if r_file and self._restore_file(r_file, path_str):
+                restored_indices.add(idx)
+            else:
+                failed += 1
+
+        remaining = [item for i, item in enumerate(self._items) if i not in restored_indices]
+        self._items[:] = remaining
+        self._populate()
+        self._status_label.configure(
+            text=f"已还原 {len(restored_indices)} 个文件" +
+                 (f"，{failed} 个失败（可能已清空回收站）" if failed else ""))
+        if self._on_restore:
+            self._on_restore(remaining)
+
+    @staticmethod
+    def _restore_file(r_file: Path, original_path: str) -> bool:
+        """Move a file from recycle bin back to its original location."""
+        try:
+            orig = Path(original_path)
+            orig.parent.mkdir(parents=True, exist_ok=True)
+            r_str = str(r_file.resolve()) + "\0\0"
+            buf = ctypes.create_unicode_buffer(r_str)
+            dest_str = str(orig.resolve()) + "\0\0"
+            dest_buf = ctypes.create_unicode_buffer(dest_str)
+
+            class SHFILEOPSTRUCTW(ctypes.Structure):
+                _fields_ = [
+                    ("hwnd", ctypes.c_void_p),
+                    ("wFunc", ctypes.c_uint),
+                    ("pFrom", ctypes.c_wchar_p),
+                    ("pTo", ctypes.c_wchar_p),
+                    ("fFlags", ctypes.c_ushort),
+                    ("fAnyOperationsAborted", ctypes.c_int),
+                    ("hNameMappings", ctypes.c_void_p),
+                    ("lpszProgressTitle", ctypes.c_wchar_p),
+                ]
+
+            fop = SHFILEOPSTRUCTW()
+            fop.hwnd = None
+            fop.wFunc = 1  # FO_MOVE
+            fop.pFrom = ctypes.cast(buf, ctypes.c_wchar_p)
+            fop.pTo = ctypes.cast(dest_buf, ctypes.c_wchar_p)
+            fop.fFlags = 0x0400  # FOF_NOERRORUI
+            result = ctypes.windll.shell32.SHFileOperationW(ctypes.byref(fop))
+            return result == 0 and not fop.fAnyOperationsAborted
+        except Exception:
+            return False
+
+    def _ui_log(self, message: str):
+        self._status_label.configure(text=message)
 
 
 def main():
