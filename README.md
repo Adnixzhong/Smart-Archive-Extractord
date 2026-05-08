@@ -17,6 +17,7 @@
   - 自动展平单层包装目录，清理残留压缩包
 - **双面板文件列表** — 左侧「待解压」+ 右侧「已解压」，支持右键设置密码、还原已解压文件到待解压列表
 - **解压后处理** — 三种模式：保留压缩包 / 移到回收站 / 直接删除，解压完成自动打开文件夹
+- **回收站还原** — 移入回收站的压缩包可批量还原，扫描 Windows `$Recycle.Bin` 精准找回
 - **Windows 原生拖放** — 支持从资源管理器直接拖入文件/文件夹
 - **2 套暗色主题** — slate / midnight，一键切换
 - **零控制台闪烁** — 所有 subprocess 调用均在后台静默执行，`main.pyw` 无控制台启动
@@ -78,9 +79,9 @@ python main.py       # 控制台启动（调试用）
 
 | 版本 | 大小 | 说明 |
 |------|------|------|
-| `Smart Archive Extractor (PyInstaller).exe` | ~14 MB | PyInstaller 单文件，分发最方便 |
-| `Smart Archive Extractor (Nuitka).exe` | ~27 MB | Nuitka 单文件，C 编译，启动较快 |
-| `Smart Archive Extractor (Nuitka 便携版).zip` | ~11 MB | Nuitka 文件夹版，解压即用，启动最快 |
+| `Smart Archive Extractor (PyInstaller).exe` | ~10 MB | PyInstaller 单文件，分发最方便 |
+| `Smart Archive Extractor (Nuitka).exe` | ~22 MB | Nuitka 单文件，C 编译，启动较快 |
+| `Smart Archive Extractor (Nuitka 便携版).zip` | ~8 MB | Nuitka 文件夹版，解压即用，启动最快 |
 
 ### 方式三：自行打包
 
@@ -107,6 +108,7 @@ python -m nuitka --standalone --windows-console-mode=disable --enable-plugin=tk-
 4. **解压** — 点击「开始解压」，工具会依次：
    - 检测格式 → 识别分卷 → 修正后缀名 → 解压 → 智能检测嵌套
 5. **嵌套解压** — 解压完成后自动检查输出内容，智能决定是否继续解压
+6. **回收站还原** — 点击「从回收站还原」可查看和恢复被本软件移入回收站的压缩包
 
 ### 密码优先级
 
