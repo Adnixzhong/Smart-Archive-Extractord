@@ -15,7 +15,7 @@
 - **双面板文件列表** — 左侧「待解压」+ 右侧「已解压」，支持右键设置密码、还原已解压文件到待解压列表
 - **解压后处理** — 三种模式：保留压缩包 / 移到回收站 / 直接删除，解压完成自动打开文件夹
 - **Windows 原生拖放** — 支持从资源管理器直接拖入文件/文件夹
-- **7 套 UI 主题** — system / light / dark / midnight / moss / sepia / mono，一键切换
+- **2 套暗色主题** — slate / midnight，一键切换
 - **零控制台闪烁** — 所有 subprocess 调用均在后台静默执行，`main.pyw` 无控制台启动
 
 ## 支持的格式
@@ -104,7 +104,8 @@ pyinstaller --onefile --windowed --name "Smart Archive Extractor" main.py
 
 ```
 smart-archive-extractor/
-├── main.py                  # 入口文件
+├── main.py                  # 入口文件（控制台）
+├── main.pyw                 # 入口文件（无控制台）
 ├── README.md
 ├── core/
 │   ├── __init__.py
@@ -149,7 +150,8 @@ smart-archive-extractor/
 
 解压完成后检查输出目录结构：
 - 仅含 1 个文件夹且该文件夹内仅 1 个文件 → 若该文件是压缩包则自动解压（继承上级密码）
-- 含多个文件/文件夹 → 列出树状结构并弹出对话框询问用户
+- 含多个文件/文件夹 → 自动扫描并递归解压所有内部压缩包
+- 自动展平单层包装目录，清理残留压缩包
 
 ## License
 

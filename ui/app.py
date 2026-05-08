@@ -1,5 +1,6 @@
 """Smart Archive Extractor — GUI Application."""
 
+import sys
 import tkinter as tk
 from tkinter import ttk, filedialog, messagebox, simpledialog
 from pathlib import Path
@@ -47,11 +48,18 @@ class ArchiveFileItem:
 
 
 class PasswordEditorDialog(tk.Toplevel):
-    def __init__(self, parent, password_manager: PasswordManager, on_change=None):
+    def __init__(self, parent, password_manager: PasswordManager, *,
+                 app_colors=None, on_change=None):
         super().__init__(parent)
-        self.title("密码库编辑")
-        self.geometry("500x500")
+        self.title("密码库")
+        self.geometry("480x480")
         self.minsize(400, 350)
+        self._C = app_colors or {
+            "canvas": "#15181d", "surface": "#1c2026", "elevated": "#22262d",
+            "card": "#292d35", "hairline": "#343840", "ink": "#e8eaed",
+            "body": "#b8bcc4", "mute": "#8a8f98", "blue": "#5dade2",
+        }
+        self.configure(bg=self._C["canvas"])
         self._pm = password_manager
         self._mode = tk.StringVar(value="builtin")
         self._on_change = on_change
@@ -61,38 +69,44 @@ class PasswordEditorDialog(tk.Toplevel):
         self._refresh_list()
 
     def _build_ui(self):
+        C = self._C
+
         tab_frame = ttk.Frame(self)
-        tab_frame.pack(fill=tk.X, padx=10, pady=(10, 5))
-        ttk.Button(tab_frame, text="内置密码", command=lambda: self._switch("builtin")).pack(side=tk.LEFT, padx=2)
-        ttk.Button(tab_frame, text="自定义密码", command=lambda: self._switch("custom")).pack(side=tk.LEFT, padx=2)
+        tab_frame.pack(fill=tk.X, padx=12, pady=(12, 8))
+        ttk.Button(tab_frame, text="内置密码", command=lambda: self._switch("builtin")).pack(side=tk.LEFT, padx=(0, 4))
+        ttk.Button(tab_frame, text="自定义密码", command=lambda: self._switch("custom")).pack(side=tk.LEFT, padx=4)
         self._tab_label = ttk.Label(tab_frame, text="")
         self._tab_label.pack(side=tk.RIGHT)
 
         list_frame = ttk.Frame(self)
-        list_frame.pack(fill=tk.BOTH, expand=True, padx=10, pady=5)
-        self._listbox = tk.Listbox(list_frame, font=("Consolas", 10), selectmode="extended")
+        list_frame.pack(fill=tk.BOTH, expand=True, padx=12, pady=4)
+        self._listbox = tk.Listbox(list_frame, font=("Cascadia Code", 10), selectmode="extended",
+                                    bg=C["surface"], fg=C["body"],
+                                    selectbackground=C["blue"], selectforeground=C["canvas"],
+                                    borderwidth=1, highlightthickness=0,
+                                    relief="solid", activestyle="none")
         scroll = ttk.Scrollbar(list_frame, orient=tk.VERTICAL, command=self._listbox.yview)
         self._listbox.configure(yscrollcommand=scroll.set)
         self._listbox.pack(side=tk.LEFT, fill=tk.BOTH, expand=True)
         scroll.pack(side=tk.RIGHT, fill=tk.Y)
 
         add_frame = ttk.Frame(self)
-        add_frame.pack(fill=tk.X, padx=10, pady=5)
-        ttk.Label(add_frame, text="新增密码:").pack(side=tk.LEFT)
+        add_frame.pack(fill=tk.X, padx=12, pady=4)
+        ttk.Label(add_frame, text="新增").pack(side=tk.LEFT)
         self._add_entry = ttk.Entry(add_frame, width=25)
-        self._add_entry.pack(side=tk.LEFT, fill=tk.X, expand=True, padx=5)
+        self._add_entry.pack(side=tk.LEFT, fill=tk.X, expand=True, padx=8)
         self._add_entry.bind("<Return>", lambda e: self._add_password())
         ttk.Button(add_frame, text="添加", command=self._add_password).pack(side=tk.LEFT)
 
         btn_frame = ttk.Frame(self)
-        btn_frame.pack(fill=tk.X, padx=10, pady=5)
-        ttk.Button(btn_frame, text="删除选中", command=self._delete_selected).pack(side=tk.LEFT, padx=2)
-        ttk.Button(btn_frame, text="导入文件", command=self._import_file).pack(side=tk.LEFT, padx=2)
-        ttk.Button(btn_frame, text="导出到文件", command=self._export_file).pack(side=tk.LEFT, padx=2)
+        btn_frame.pack(fill=tk.X, padx=12, pady=4)
+        ttk.Button(btn_frame, text="删除选中", command=self._delete_selected).pack(side=tk.LEFT, padx=(0, 4))
+        ttk.Button(btn_frame, text="导入文件", command=self._import_file).pack(side=tk.LEFT, padx=4)
+        ttk.Button(btn_frame, text="导出文件", command=self._export_file).pack(side=tk.LEFT, padx=4)
 
-        self._status_label = ttk.Label(self, text="", foreground="gray")
-        self._status_label.pack(fill=tk.X, padx=10, pady=(5, 10))
-        ttk.Button(self, text="关闭", command=self._close).pack(pady=(0, 10))
+        self._status_label = ttk.Label(self, text="", foreground=C["mute"])
+        self._status_label.pack(fill=tk.X, padx=12, pady=(6, 12))
+        ttk.Button(self, text="关闭", command=self._close).pack(pady=(0, 12))
 
     def _close(self):
         if self._on_change:
@@ -174,7 +188,12 @@ class SmartExtractorApp:
         self._completed: list[ArchiveFileItem] = []
         self._output_dir = Path.home() / "Extracted"
         self._password_manager = PasswordManager()
-        self._password_file = Path(__file__).resolve().parent.parent / "passwords.txt"
+        # Store passwords next to the exe (PyInstaller) or in project root (source)
+        if getattr(sys, "frozen", False):
+            _exe_dir = Path(sys.executable).resolve().parent
+        else:
+            _exe_dir = Path(__file__).resolve().parent.parent
+        self._password_file = _exe_dir / "passwords.txt"
         self._pwdfile_var = tk.StringVar()
         self._auto_rename = tk.BooleanVar(value=True)
         self._auto_password = tk.BooleanVar(value=True)
@@ -183,7 +202,7 @@ class SmartExtractorApp:
         self._open_after = tk.BooleanVar(value=False)
         self._cancel_flag = threading.Event()
         self._current_thread: threading.Thread | None = None
-        self._theme = tk.StringVar(value="system")
+        self._theme = tk.StringVar(value="slate")
 
         self._build_ui()
         self._apply_theme()
@@ -197,33 +216,33 @@ class SmartExtractorApp:
 
     def _build_ui(self):
         # --- Top bar ---
-        top_frame = ttk.Frame(self.root, padding=10)
+        top_frame = ttk.Frame(self.root, padding=(16, 12))
         top_frame.pack(fill=tk.X)
-        ttk.Label(top_frame, text="智能解压工具", font=("Microsoft YaHei", 16, "bold")).pack(side=tk.LEFT)
-        ttk.Label(top_frame, text="主题:").pack(side=tk.LEFT, padx=(20, 2))
+        ttk.Label(top_frame, text="Smart Archive Extractor",
+                  font=("Segoe UI", 16, "bold")).pack(side=tk.LEFT)
         theme_cb = ttk.Combobox(top_frame, textvariable=self._theme,
-                                values=["system", "light", "dark", "midnight", "moss", "sepia", "mono"],
+                                values=["slate", "midnight"],
                                 state="readonly", width=10)
-        theme_cb.pack(side=tk.LEFT)
+        theme_cb.pack(side=tk.LEFT, padx=(16, 0))
         theme_cb.bind("<<ComboboxSelected>>", lambda e: self._apply_theme())
         sz = find_7z()
         if sz:
-            ttk.Label(top_frame, text=f"7z: {sz}", foreground="green").pack(side=tk.RIGHT, padx=10)
+            ttk.Label(top_frame, text="7-Zip ✓", foreground=self._C["green"]).pack(side=tk.RIGHT, padx=10)
         else:
-            ttk.Label(top_frame, text="7z: 未找到 (请安装 7-Zip)", foreground="red").pack(side=tk.RIGHT, padx=10)
+            ttk.Label(top_frame, text="7-Zip ✗", foreground=self._C["red"]).pack(side=tk.RIGHT, padx=10)
 
         # --- Dual-panel file list ---
         list_frame = ttk.Frame(self.root)
-        list_frame.pack(fill=tk.BOTH, expand=True, padx=10, pady=(0, 5))
+        list_frame.pack(fill=tk.BOTH, expand=True, padx=12, pady=(0, 8))
 
         # Left panel: pending
-        pending_frame = ttk.LabelFrame(list_frame, text="待解压 (右键设置密码)", padding=3)
+        pending_frame = ttk.LabelFrame(list_frame, text="待解压", padding=4)
         pending_frame.pack(side=tk.LEFT, fill=tk.BOTH, expand=True)
 
         self._tree_pending = ttk.Treeview(pending_frame,
                                           columns=("#", "文件名", "格式", "操作"),
                                           show="headings", selectmode="extended", height=6)
-        self._tree_pending.column("#", width=25, anchor="center")
+        self._tree_pending.column("#", width=28, anchor="center")
         self._tree_pending.column("文件名", width=200)
         self._tree_pending.column("格式", width=70, anchor="center")
         self._tree_pending.column("操作", width=110, anchor="center")
@@ -236,21 +255,25 @@ class SmartExtractorApp:
         p_scroll.pack(side=tk.RIGHT, fill=tk.Y)
 
         # Right-click menu for pending
-        self._pwd_menu = tk.Menu(self.root, tearoff=0)
+        self._pwd_menu = tk.Menu(self.root, tearoff=0,
+                                 bg=self._C["elevated"], fg=self._C["body"],
+                                 activebackground=self._C["card"], activeforeground=self._C["ink"],
+                                 borderwidth=1, relief="solid",
+                                 font=("Segoe UI", 10))
         self._pwd_menu.add_command(label="设置密码...", command=self._set_file_password)
         self._pwd_menu.add_command(label="清除密码", command=self._clear_file_password)
         self._tree_pending.bind("<Button-3>", self._on_pending_right_click)
 
         # Right panel: completed
-        done_frame = ttk.LabelFrame(list_frame, text="已解压", padding=3)
-        done_frame.pack(side=tk.RIGHT, fill=tk.BOTH, expand=True, padx=(5, 0))
+        done_frame = ttk.LabelFrame(list_frame, text="已解压", padding=4)
+        done_frame.pack(side=tk.RIGHT, fill=tk.BOTH, expand=True, padx=(6, 0))
 
         self._tree_done = ttk.Treeview(done_frame,
                                        columns=("文件名", "输出路径", "状态"),
                                        show="headings", selectmode="extended", height=6)
         self._tree_done.column("文件名", width=160)
         self._tree_done.column("输出路径", width=160)
-        self._tree_done.column("状态", width=70, anchor="center")
+        self._tree_done.column("状态", width=50, anchor="center")
         for c in ("文件名", "输出路径", "状态"):
             self._tree_done.heading(c, text=c)
 
@@ -260,193 +283,248 @@ class SmartExtractorApp:
         d_scroll.pack(side=tk.RIGHT, fill=tk.Y)
 
         # Right-click menu for completed
-        self._done_menu = tk.Menu(self.root, tearoff=0)
+        self._done_menu = tk.Menu(self.root, tearoff=0,
+                                  bg=self._C["elevated"], fg=self._C["body"],
+                                  activebackground=self._C["card"], activeforeground=self._C["ink"],
+                                  borderwidth=1, relief="solid",
+                                  font=("Segoe UI", 10))
         self._done_menu.add_command(label="还原到待解压", command=self._restore_selected)
         self._tree_done.bind("<Button-3>", self._on_done_right_click)
 
         # --- Toolbar below panels ---
         toolbar = ttk.Frame(self.root)
-        toolbar.pack(fill=tk.X, padx=10, pady=(0, 5))
-        ttk.Button(toolbar, text="添加文件", command=self._add_files).pack(side=tk.LEFT, padx=2)
-        ttk.Button(toolbar, text="添加文件夹", command=self._add_directory).pack(side=tk.LEFT, padx=2)
-        ttk.Button(toolbar, text="移除选中", command=self._remove_selected).pack(side=tk.LEFT, padx=2)
-        ttk.Button(toolbar, text="清空待解压", command=self._clear_pending).pack(side=tk.LEFT, padx=2)
-        ttk.Button(toolbar, text="还原选中", command=self._restore_selected).pack(side=tk.LEFT, padx=2)
-        ttk.Button(toolbar, text="清空已完成", command=self._clear_completed).pack(side=tk.LEFT, padx=2)
+        toolbar.pack(fill=tk.X, padx=12, pady=(0, 8))
+        ttk.Button(toolbar, text="添加文件", command=self._add_files).pack(side=tk.LEFT, padx=(0, 4))
+        ttk.Button(toolbar, text="添加文件夹", command=self._add_directory).pack(side=tk.LEFT, padx=4)
+        ttk.Button(toolbar, text="移除选中", command=self._remove_selected).pack(side=tk.LEFT, padx=4)
+        ttk.Button(toolbar, text="清空列表", command=self._clear_pending).pack(side=tk.LEFT, padx=4)
+        ttk.Button(toolbar, text="还原选中", command=self._restore_selected).pack(side=tk.LEFT, padx=4)
+        ttk.Button(toolbar, text="清空已完成", command=self._clear_completed).pack(side=tk.LEFT, padx=4)
 
         # --- Options panel ---
-        opt_frame = ttk.LabelFrame(self.root, text="选项", padding=8)
-        opt_frame.pack(fill=tk.X, padx=10, pady=(0, 5))
+        opt_frame = ttk.LabelFrame(self.root, text="选项", padding=(12, 10))
+        opt_frame.pack(fill=tk.X, padx=12, pady=(0, 8))
 
         row1 = ttk.Frame(opt_frame)
-        row1.pack(fill=tk.X, pady=2)
-        ttk.Label(row1, text="输出目录:").pack(side=tk.LEFT)
+        row1.pack(fill=tk.X, pady=(0, 6))
+        ttk.Label(row1, text="输出目录").pack(side=tk.LEFT)
         self._output_var = tk.StringVar(value=str(self._output_dir))
-        ttk.Entry(row1, textvariable=self._output_var, width=50).pack(side=tk.LEFT, fill=tk.X, expand=True, padx=5)
+        ttk.Entry(row1, textvariable=self._output_var, width=50).pack(side=tk.LEFT, fill=tk.X, expand=True, padx=8)
         ttk.Button(row1, text="浏览", command=self._browse_output).pack(side=tk.LEFT)
 
         row2 = ttk.Frame(opt_frame)
-        row2.pack(fill=tk.X, pady=2)
-        ttk.Label(row2, text="密码字典:").pack(side=tk.LEFT)
-        ttk.Entry(row2, textvariable=self._pwdfile_var, width=42).pack(side=tk.LEFT, fill=tk.X, expand=True, padx=5)
+        row2.pack(fill=tk.X, pady=6)
+        ttk.Label(row2, text="密码字典").pack(side=tk.LEFT)
+        ttk.Entry(row2, textvariable=self._pwdfile_var, width=42).pack(side=tk.LEFT, fill=tk.X, expand=True, padx=8)
         ttk.Button(row2, text="浏览", command=self._browse_password_file).pack(side=tk.LEFT)
-        ttk.Button(row2, text="编辑", command=self._open_password_editor).pack(side=tk.LEFT, padx=1)
-        ttk.Button(row2, text="导出默认", command=self._export_default_pwd).pack(side=tk.LEFT)
+        ttk.Button(row2, text="编辑", command=self._open_password_editor).pack(side=tk.LEFT, padx=(4, 0))
+        ttk.Button(row2, text="导出", command=self._export_default_pwd).pack(side=tk.LEFT, padx=(4, 0))
 
         row3 = ttk.Frame(opt_frame)
-        row3.pack(fill=tk.X, pady=2)
-        ttk.Checkbutton(row3, text="自动修正后缀名", variable=self._auto_rename).pack(side=tk.LEFT, padx=(0, 15))
-        ttk.Checkbutton(row3, text="自动尝试密码", variable=self._auto_password).pack(side=tk.LEFT, padx=(0, 15))
+        row3.pack(fill=tk.X, pady=6)
+        self._chk_rename = tk.Checkbutton(row3, text="自动修正后缀名", variable=self._auto_rename)
+        self._chk_rename.pack(side=tk.LEFT, padx=(0, 16))
+        self._chk_pwd = tk.Checkbutton(row3, text="自动尝试密码", variable=self._auto_password)
+        self._chk_pwd.pack(side=tk.LEFT, padx=(0, 16))
         self._pwd_count_label = ttk.Label(row3, text="")
         self._pwd_count_label.pack(side=tk.LEFT)
         self._update_pwd_count_display()
 
         row4 = ttk.Frame(opt_frame)
-        row4.pack(fill=tk.X, pady=2)
-        ttk.Label(row4, text="输出方式:").pack(side=tk.LEFT)
-        ttk.Radiobutton(row4, text="解压到压缩包目录", variable=self._wrap_folder, value=False).pack(side=tk.LEFT, padx=(5, 10))
+        row4.pack(fill=tk.X, pady=6)
+        ttk.Label(row4, text="输出方式").pack(side=tk.LEFT)
+        ttk.Radiobutton(row4, text="解压到压缩包目录", variable=self._wrap_folder, value=False).pack(side=tk.LEFT, padx=(8, 16))
         ttk.Radiobutton(row4, text="解压到同名文件夹", variable=self._wrap_folder, value=True).pack(side=tk.LEFT)
 
         row5 = ttk.Frame(opt_frame)
-        row5.pack(fill=tk.X, pady=2)
-        ttk.Label(row5, text="解压后:").pack(side=tk.LEFT)
-        ttk.Radiobutton(row5, text="保留压缩包", variable=self._delete_mode, value="none").pack(side=tk.LEFT, padx=(5, 10))
-        ttk.Radiobutton(row5, text="移到回收站", variable=self._delete_mode, value="recycle").pack(side=tk.LEFT, padx=(0, 10))
-        ttk.Radiobutton(row5, text="直接删除", variable=self._delete_mode, value="delete").pack(side=tk.LEFT, padx=(0, 15))
-        ttk.Checkbutton(row5, text="解压完成后打开文件夹", variable=self._open_after).pack(side=tk.LEFT)
+        row5.pack(fill=tk.X, pady=(6, 0))
+        ttk.Label(row5, text="解压后").pack(side=tk.LEFT)
+        ttk.Radiobutton(row5, text="保留压缩包", variable=self._delete_mode, value="none").pack(side=tk.LEFT, padx=(8, 16))
+        ttk.Radiobutton(row5, text="移到回收站", variable=self._delete_mode, value="recycle").pack(side=tk.LEFT, padx=(0, 16))
+        ttk.Radiobutton(row5, text="直接删除", variable=self._delete_mode, value="delete").pack(side=tk.LEFT, padx=(0, 16))
+        self._chk_open = tk.Checkbutton(row5, text="完成后打开文件夹", variable=self._open_after)
+        self._chk_open.pack(side=tk.LEFT)
 
         # --- Progress bar ---
         self._progress = ttk.Progressbar(self.root, mode="determinate", length=400)
-        self._progress.pack(fill=tk.X, padx=10, pady=(0, 2))
+        self._progress.pack(fill=tk.X, padx=12, pady=(8, 0))
+
+        # --- Action buttons ---
+        bottom = ttk.Frame(self.root, padding=(12, 8))
+        bottom.pack(fill=tk.X)
+        self._extract_btn = ttk.Button(bottom, text="开始解压",
+                                       command=self._start_extraction, width=12,
+                                       style="Primary.TButton")
+        self._extract_btn.pack(side=tk.LEFT, padx=(0, 4))
+        self._stop_btn = ttk.Button(bottom, text="停止", command=self._stop_extraction, state="disabled", width=8)
+        self._stop_btn.pack(side=tk.LEFT, padx=4)
+        self._clear_log_btn = ttk.Button(bottom, text="清空日志", width=8)
+        self._clear_log_btn.pack(side=tk.LEFT, padx=4)
+        self._status_label = ttk.Label(bottom, text="就绪")
+        self._status_label.pack(side=tk.RIGHT, padx=10)
 
         # --- Log area ---
-        log_frame = ttk.LabelFrame(self.root, text="日志", padding=3)
-        log_frame.pack(fill=tk.BOTH, expand=True, padx=10, pady=(0, 5))
+        log_frame = ttk.LabelFrame(self.root, text="日志", padding=4)
+        log_frame.pack(fill=tk.BOTH, expand=True, padx=12, pady=(0, 8))
 
-        self._log_text = tk.Text(log_frame, height=5, state="disabled", font=("Consolas", 9), wrap=tk.WORD)
+        self._log_text = tk.Text(log_frame, height=5, state="disabled", wrap=tk.WORD)
         log_scroll = ttk.Scrollbar(log_frame, orient=tk.VERTICAL, command=self._log_text.yview)
         self._log_text.configure(yscrollcommand=log_scroll.set)
         self._log_text.pack(side=tk.LEFT, fill=tk.BOTH, expand=True)
         log_scroll.pack(side=tk.RIGHT, fill=tk.Y)
         self._logger = LogHandler(self._log_text)
-
-        # --- Bottom buttons ---
-        bottom = ttk.Frame(self.root, padding=10)
-        bottom.pack(fill=tk.X)
-        self._extract_btn = ttk.Button(bottom, text="开始解压", command=self._start_extraction, width=12)
-        self._extract_btn.pack(side=tk.LEFT, padx=2)
-        self._stop_btn = ttk.Button(bottom, text="停止", command=self._stop_extraction, state="disabled", width=8)
-        self._stop_btn.pack(side=tk.LEFT, padx=2)
-        ttk.Button(bottom, text="清空日志", command=self._logger.clear, width=8).pack(side=tk.LEFT, padx=2)
-        self._status_label = ttk.Label(bottom, text="就绪", foreground="gray")
-        self._status_label.pack(side=tk.RIGHT, padx=10)
+        self._clear_log_btn.configure(command=self._logger.clear)
 
         # Enable drag-and-drop
         windnd.hook_dropfiles(self.root, func=self._on_drop_files)
 
     # ============================================================
-    #  Theme
+    #  Theme system
     # ============================================================
 
+    _THEME_PALETTES = {
+        "slate": {   # medium dark — readable
+            "canvas": "#15181d", "surface": "#1c2026", "elevated": "#22262d",
+            "card": "#292d35", "hairline": "#343840",
+            "ink": "#e8eaed", "body": "#b8bcc4", "mute": "#8a8f98",
+            "ash": "#5f646e", "stone": "#41454d",
+            "blue": "#5dade2", "green": "#58d68d", "red": "#ec7063", "yellow": "#f4d03f",
+        },
+        "midnight": { # deeper dark — OLED friendly
+            "canvas": "#0a0c10", "surface": "#111318", "elevated": "#171a21",
+            "card": "#1e2129", "hairline": "#2a2d36",
+            "ink": "#e4e6eb", "body": "#b0b4bd", "mute": "#828790",
+            "ash": "#5a5e67", "stone": "#3e4149",
+            "blue": "#4da6e8", "green": "#4dc987", "red": "#e06055", "yellow": "#e8c43a",
+        },
+    }
+
+    @property
+    def _C(self):
+        return self._THEME_PALETTES[self._theme.get()]
+
     def _apply_theme(self):
+        C = self._C
         style = ttk.Style()
-        theme_name = self._theme.get()
         available = style.theme_names()
         base = "clam" if "clam" in available else available[0]
-
-        if theme_name == "system":
-            for t in ("vista", "winnative", "clam", "alt", "default"):
-                if t in available:
-                    style.theme_use(t)
-                    break
-            self.root.configure(bg="")
-            self._log_text.configure(bg="white", fg="black", insertbackground="black")
-
-        elif theme_name == "light":
-            style.theme_use(base)
-            style.configure("TFrame", background="#f5f5f5")
-            style.configure("TLabel", background="#f5f5f5", foreground="#1a1a1a")
-            style.configure("TLabelframe", background="#f5f5f5", foreground="#1a1a1a")
-            style.configure("TLabelframe.Label", background="#f5f5f5", foreground="#1a1a1a")
-            style.configure("TButton", background="#e8e8e8", foreground="#1a1a1a", borderwidth=1)
-            style.map("TButton", background=[("active", "#d0d0d0")])
-            style.configure("TCheckbutton", background="#f5f5f5", foreground="#1a1a1a")
-            style.configure("TRadiobutton", background="#f5f5f5", foreground="#1a1a1a")
-            style.configure("TEntry", fieldbackground="white", foreground="#1a1a1a")
-            style.configure("TCombobox", fieldbackground="white", foreground="#1a1a1a")
-            style.configure("TProgressbar", background="#4a90d9", troughcolor="#e0e0e0")
-            style.configure("Treeview", background="white", foreground="#1a1a1a", fieldbackground="white")
-            style.configure("Treeview.Heading", background="#e8e8e8", foreground="#1a1a1a")
-            style.map("Treeview", background=[("selected", "#4a90d9")], foreground=[("selected", "white")])
-            self.root.configure(bg="#f5f5f5")
-            self._log_text.configure(bg="white", fg="#1a1a1a", insertbackground="#1a1a1a")
-
-        elif theme_name == "dark":
-            self._apply_dark_variant(style, base,
-                canvas="#07080a", surface="#0d0d0d", elevated="#101111",
-                card="#121212", hairline="#242728", ink="#f4f4f6",
-                body="#cdcdcd", mute="#9c9c9c", accent="#57c1ff")
-
-        elif theme_name == "midnight":
-            self._apply_dark_variant(style, base,
-                canvas="#0a0d14", surface="#101520", elevated="#151a28",
-                card="#1a2030", hairline="#1e2d3d", ink="#e8ecf2",
-                body="#b8c4d4", mute="#6b7d95", accent="#6a9fff")
-
-        elif theme_name == "moss":
-            self._apply_dark_variant(style, base,
-                canvas="#0a0f0a", surface="#0f150f", elevated="#141a14",
-                card="#1a201a", hairline="#243024", ink="#e8efe8",
-                body="#b8c8b8", mute="#6b846b", accent="#7acc7a")
-
-        elif theme_name == "sepia":
-            self._apply_dark_variant(style, base,
-                canvas="#1a1410", surface="#211a15", elevated="#28201a",
-                card="#2e2520", hairline="#3d3228", ink="#f0e8e0",
-                body="#c8b8a8", mute="#8c7a6a", accent="#d4a854")
-
-        elif theme_name == "mono":
-            self._apply_dark_variant(style, base,
-                canvas="#0a0a0a", surface="#121212", elevated="#181818",
-                card="#1e1e1e", hairline="#2a2a2a", ink="#fafafa",
-                body="#c0c0c0", mute="#7a7a7a", accent="#e0e0e0")
-
-    def _apply_dark_variant(self, style, base, *, canvas, surface, elevated, card,
-                            hairline, ink, body, mute, accent):
-        """Apply a dark theme variant with the given color palette."""
         style.theme_use(base)
+        # --- Frames ---
+        style.configure("TFrame", background=C["canvas"])
+        style.configure("TLabelframe", background=C["canvas"], foreground=C["ink"],
+                        borderwidth=1, bordercolor=C["hairline"], relief="solid")
+        style.configure("TLabelframe.Label", background=C["canvas"], foreground=C["ink"],
+                        font=("Segoe UI", 10, "bold"))
 
-        style.configure("TFrame", background=canvas)
-        style.configure("TLabel", background=canvas, foreground=body)
-        style.configure("TLabelframe", background=canvas, foreground=ink)
-        style.configure("TLabelframe.Label", background=canvas, foreground=ink)
+        # --- Labels ---
+        style.configure("TLabel", background=C["canvas"], foreground=C["body"],
+                        font=("Segoe UI", 10))
 
-        style.configure("TButton", background=elevated, foreground=ink,
-                        borderwidth=1, focusthickness=0)
+        # --- Buttons ---
+        style.configure("TButton",
+                        background=C["elevated"], foreground=C["ink"],
+                        borderwidth=1, bordercolor=C["hairline"],
+                        focusthickness=0, font=("Segoe UI", 10),
+                        padding=(12, 6))
         style.map("TButton",
-                  background=[("active", card), ("pressed", card)],
-                  foreground=[("active", ink), ("pressed", ink)])
+                  background=[("active", C["card"]), ("pressed", C["surface"])],
+                  foreground=[("active", C["ink"]), ("pressed", C["ink"]),
+                              ("disabled", C["ash"])],
+                  bordercolor=[("active", C["hairline"])])
 
-        style.configure("TCheckbutton", background=canvas, foreground=body)
-        style.configure("TRadiobutton", background=canvas, foreground=body)
+        # --- Primary button ---
+        style.configure("Primary.TButton",
+                        background=C["ink"], foreground=C["canvas"],
+                        borderwidth=0, focusthickness=0,
+                        font=("Segoe UI", 10, "bold"),
+                        padding=(16, 6))
+        style.map("Primary.TButton",
+                  background=[("active", "#e8e8e8"), ("pressed", "#d0d0d0")],
+                  foreground=[("active", C["canvas"]), ("pressed", C["canvas"]),
+                              ("disabled", C["stone"])])
 
-        style.configure("TEntry", fieldbackground=elevated, foreground=ink)
+        # --- Check & Radio ---
+        # --- Checkbuttons (tk) ---
+        for chk in [self._chk_rename, self._chk_pwd, self._chk_open]:
+            chk.configure(
+                bg=C["canvas"], fg=C["body"],
+                selectcolor=C["elevated"],
+                activebackground=C["elevated"],
+                activeforeground=C["ink"],
+                highlightthickness=0,
+                font=("Segoe UI", 10),
+            )
 
-        style.configure("TCombobox", fieldbackground=elevated, foreground=ink,
-                        background=elevated, arrowcolor=body)
+        style.configure("TRadiobutton", background=C["canvas"], foreground=C["body"],
+                        font=("Segoe UI", 10))
+        style.map("TRadiobutton",
+                  background=[("active", C["elevated"]), ("hover", C["elevated"]),
+                              ("focus", C["canvas"]), ("!active", C["canvas"])],
+                  foreground=[("active", C["ink"])])
 
-        style.configure("TProgressbar", background=accent, troughcolor=elevated)
+        # --- Entries ---
+        style.configure("TEntry", fieldbackground=C["elevated"], foreground=C["ink"],
+                        borderwidth=1, bordercolor=C["hairline"],
+                        font=("Segoe UI", 10))
+        style.map("TEntry", bordercolor=[("focus", C["stone"])])
 
-        style.configure("Treeview", background=surface, foreground=body,
-                        fieldbackground=surface, borderwidth=1, bordercolor=hairline)
-        style.configure("Treeview.Heading", background=elevated, foreground=ink,
-                        borderwidth=1, bordercolor=hairline)
+        # --- Combobox ---
+        style.configure("TCombobox", fieldbackground=C["elevated"], foreground=C["ink"],
+                        background=C["elevated"], arrowcolor=C["body"],
+                        borderwidth=1, bordercolor=C["hairline"],
+                        font=("Segoe UI", 10))
+        style.map("TCombobox",
+                  fieldbackground=[("readonly", C["elevated"])],
+                  foreground=[("readonly", C["ink"])])
+
+        # --- Progress bar ---
+        style.configure("TProgressbar", background=C["blue"],
+                        troughcolor=C["elevated"], borderwidth=1,
+                        bordercolor=C["hairline"])
+
+        # --- Treeview ---
+        style.configure("Treeview", background=C["surface"], foreground=C["body"],
+                        fieldbackground=C["surface"], borderwidth=1,
+                        bordercolor=C["hairline"], font=("Segoe UI", 10))
+        style.configure("Treeview.Heading", background=C["elevated"],
+                        foreground=C["ink"], borderwidth=1,
+                        bordercolor=C["hairline"],
+                        font=("Segoe UI", 9, "bold"))
+        style.map("Treeview.Heading",
+                  background=[("active", C["card"])],
+                  foreground=[("active", C["ink"])])
         style.map("Treeview",
-                  background=[("selected", accent)],
-                  foreground=[("selected", canvas)])
+                  background=[("selected", C["blue"])],
+                  foreground=[("selected", C["canvas"])])
 
-        self.root.configure(bg=canvas)
-        self._log_text.configure(bg=surface, fg=body, insertbackground=body)
+        # --- Root ---
+        self.root.configure(bg=C["canvas"])
+
+        # --- Separators ---
+        style.configure("TSeparator", background=C["hairline"])
+
+        # --- Log ---
+        self._log_text.configure(
+            bg=C["surface"], fg=C["body"], insertbackground=C["body"],
+            font=("Cascadia Code", 9),
+            borderwidth=1, highlightthickness=0,
+            padx=8, pady=4,
+            selectbackground=C["blue"],
+            selectforeground=C["canvas"],
+        )
+
+        # --- Status ---
+        self._status_label.configure(foreground=C["mute"])
+
+        # --- Primary extract button ---
+        self._extract_btn.configure(style="Primary.TButton")
+
+        # --- Update 7z status indicator ---
+        for c in self.root.winfo_children():
+            if isinstance(c, ttk.Frame):
+                for w in c.winfo_children():
+                    pass  # no-op — the top labels are already built
+        self.root.update_idletasks()
 
     # ============================================================
     #  File management
@@ -640,7 +718,9 @@ class SmartExtractorApp:
             self._save_persistent_passwords()
 
     def _open_password_editor(self):
-        PasswordEditorDialog(self.root, self._password_manager, on_change=self._save_persistent_passwords)
+        PasswordEditorDialog(self.root, self._password_manager,
+                             app_colors=self._C,
+                             on_change=self._save_persistent_passwords)
         self._update_pwd_count_display()
 
     def _export_default_pwd(self):
@@ -1167,12 +1247,6 @@ class SmartExtractorApp:
 
 def main():
     root = tk.Tk()
-    style = ttk.Style()
-    available = style.theme_names()
-    for preferred in ("vista", "winnative", "clam", "alt", "default"):
-        if preferred in available:
-            style.theme_use(preferred)
-            break
     SmartExtractorApp(root)
     root.mainloop()
 
