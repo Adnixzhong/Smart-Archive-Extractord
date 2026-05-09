@@ -136,20 +136,10 @@ python -m nuitka --standalone --windows-console-mode=disable --enable-plugin=tk-
 | 掩码攻击 | 按模式生成（`?` 替换为字符集字符，如 `???2024`） |
 | 规则叠加 | 对字典词进行大小写、leet、数字/符号、反转、重复等变换 |
 
-### CPU vs GPU
-
-| | CPU (内置) | GPU (hashcat) |
-|------|-----------|---------------|
-| ZIP | ~70,000 次/秒 (多进程) | 数百万~数亿 次/秒 |
-| RAR/7z | ~10-100 次/秒 (7z t) | 数百万 次/秒 |
-| 依赖 | 无 | hashcat + 兼容显卡 |
-| 适用 | ZIP 短密码快速尝试 | 所有格式、长密码、复杂字符集 |
-
 ### GPU 环境配置
 
-1. 安装显卡驱动 — NVIDIA (CUDA) / AMD (ROCm/HIP) / Intel (oneAPI)
-2. 安装 [hashcat](https://hashcat.net/hashcat/) — 或点击破解对话框中的「下载工具...」自动安装
-3. 安装 John the Ripper 工具 (rar2john / 7z2john) — 同上，一键下载到 `%APPDATA%\Smart Archive Extractor\tools\`
+1. 安装 [hashcat](https://hashcat.net/hashcat/) — 或点击破解对话框中的「下载工具...」自动安装
+2. 安装 John the Ripper 工具 (rar2john / 7z2john) — 同上，一键下载到 `%APPDATA%\Smart Archive Extractor\tools\`
 
 首次使用 GPU 模式时程序会自动提示下载缺失的工具。
 
