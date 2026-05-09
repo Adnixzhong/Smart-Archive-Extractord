@@ -228,4 +228,4 @@ MIT
 - **[hashcat](https://hashcat.net/hashcat/)** — [MIT License](https://github.com/hashcat/hashcat/blob/master/docs/license.txt)
 - **[John the Ripper](https://www.openwall.com/john/)** (rar2john, 7z2john) — [GPLv2+](https://github.com/openwall/john/blob/main/doc/LICENSE)
 
-子进程调用属于 "mere aggregation"，不构成衍生作品，不触发 GPL copyleft 条款。
+
