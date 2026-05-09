@@ -3,6 +3,7 @@
 import subprocess
 import re
 import os
+import zipfile
 from pathlib import Path
 from typing import Optional, Callable
 
@@ -228,6 +229,82 @@ def extract_with_password_list(
         success=False, output_dir=str(output_dir),
         error="All passwords exhausted, none worked"
     )
+
+
+def _7z_test_password(archive_path: Path, password: str) -> bool:
+    """Test a password using 7z t (test mode, no disk writes)."""
+    sz = find_7z()
+    if sz is None:
+        return False
+    cmd = [
+        str(sz), "t",
+        str(archive_path),
+        "-y",
+        f"-p{password}",
+    ]
+    try:
+        proc = subprocess.Popen(
+            cmd,
+            stdout=subprocess.PIPE,
+            stderr=subprocess.STDOUT,
+            text=True,
+            encoding="utf-8",
+            errors="replace",
+            **_subprocess_kwargs(),
+        )
+        output = proc.stdout.read() if proc.stdout else ""
+        proc.wait()
+        return "Everything is Ok" in output and "Wrong password" not in output
+    except Exception:
+        return False
+
+
+def verify_password(archive_path: str | Path, password: str,
+                    zip_file: zipfile.ZipFile | None = None) -> bool:
+    """Quickly verify if a password is correct without writing files.
+
+    Uses zipfile for ZIP (fast in-process), 7z t for other formats.
+    Pass a pre-opened zipfile.ZipFile to reuse across multiple passwords.
+    """
+    path = Path(archive_path).resolve()
+    if not path.is_file():
+        return False
+    if not password:
+        return False
+
+    lower = path.name.lower()
+
+    # ZIP fast-path: use Python's built-in zipfile (no subprocess overhead)
+    if lower.endswith(".zip") or lower.endswith(".zip.001"):
+        # Use pre-opened zipfile if provided (per-thread cached for cracking)
+        if zip_file is not None:
+            try:
+                zip_file.read(zip_file.namelist()[0],
+                              pwd=password.encode("utf-8", errors="replace"))
+                return True
+            except NotImplementedError:
+                return _7z_test_password(path, password)
+            except (RuntimeError, zipfile.BadZipFile):
+                return False
+            except Exception:
+                return False
+
+        try:
+            with zipfile.ZipFile(path, "r") as z:
+                names = z.namelist()
+                if not names:
+                    return False
+                z.read(names[0], pwd=password.encode("utf-8", errors="replace"))
+                return True
+        except NotImplementedError:
+            return _7z_test_password(path, password)
+        except (RuntimeError, zipfile.BadZipFile):
+            return False
+        except Exception:
+            return False
+
+    # All other formats: use 7z test mode (no disk writes)
+    return _7z_test_password(path, password)
 
 
 # Archive extensions to scan for in nested extraction

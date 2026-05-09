@@ -17,6 +17,36 @@ from core.split_detector import find_volumes, is_split_archive
 from core.renamer import get_correct_path, needs_rename
 from core.extractor import extract, find_7z, ExtractError, scan_for_archives
 from core.password import PasswordManager
+from ui.crack_dialog import CrackDialog
+
+
+def _get_monitor_work_area(x: int, y: int) -> tuple[int, int, int, int]:
+    """Return (left, top, right, bottom) of the monitor containing (x, y)."""
+    from ctypes import wintypes
+
+    class RECT(ctypes.Structure):
+        _fields_ = [
+            ("left", ctypes.c_long),
+            ("top", ctypes.c_long),
+            ("right", ctypes.c_long),
+            ("bottom", ctypes.c_long),
+        ]
+
+    class MONITORINFO(ctypes.Structure):
+        _fields_ = [
+            ("cbSize", wintypes.DWORD),
+            ("rcMonitor", RECT),
+            ("rcWork", RECT),
+            ("dwFlags", wintypes.DWORD),
+        ]
+
+    pt = wintypes.POINT(x, y)
+    monitor = ctypes.windll.user32.MonitorFromPoint(pt, 2)  # MONITOR_DEFAULTTONEAREST
+    info = MONITORINFO()
+    info.cbSize = ctypes.sizeof(MONITORINFO)
+    ctypes.windll.user32.GetMonitorInfoW(monitor, ctypes.byref(info))
+    r = info.rcWork
+    return (r.left, r.top, r.right, r.bottom)
 
 
 class LogHandler:
@@ -54,8 +84,8 @@ class PasswordEditorDialog(tk.Toplevel):
                  app_colors=None, on_change=None):
         super().__init__(parent)
         self.title("密码库")
-        self.geometry("500x520")
-        self.minsize(400, 380)
+        self.geometry("500x560")
+        self.minsize(400, 420)
         self._C = app_colors or {
             "canvas": "#15181d", "surface": "#1c2026", "elevated": "#22262d",
             "card": "#292d35", "hairline": "#343840", "ink": "#e8eaed",
@@ -68,13 +98,28 @@ class PasswordEditorDialog(tk.Toplevel):
         self.grab_set()
         self._build_ui()
         self._refresh_list()
+        windnd.hook_dropfiles(self, func=self._on_drop_files)
 
     def _build_ui(self):
         C = self._C
 
-        # Multi-line paste area + add button
-        add_label = ttk.Label(self, text="粘贴密码（一行一个）", font=("Segoe UI", 9))
-        add_label.pack(fill=tk.X, padx=12, pady=(12, 4))
+        # Drop hint / drag area
+        self._drop_frame = tk.Frame(self, bg=C["surface"], height=56,
+                                     highlightbackground=C["hairline"],
+                                     highlightthickness=1)
+        self._drop_frame.pack(fill=tk.X, padx=12, pady=(12, 4))
+        self._drop_frame.pack_propagate(False)
+        self._drop_hint = tk.Label(self._drop_frame,
+                                    text="拖入 .txt 文件到此处自动导入 (一行一个密码)",
+                                    bg=C["surface"], fg=C["mute"],
+                                    font=("Segoe UI", 10))
+        self._drop_hint.pack(expand=True)
+        self._drop_frame.bind("<Enter>", self._on_drop_enter)
+        self._drop_frame.bind("<Leave>", self._on_drop_leave)
+
+        # Multi-line paste area + buttons
+        add_label = ttk.Label(self, text="或粘贴密码（一行一个）", font=("Segoe UI", 9))
+        add_label.pack(fill=tk.X, padx=12, pady=(8, 4))
         self._add_text = tk.Text(self, height=4, wrap=tk.WORD,
                                   bg=C["surface"], fg=C["body"],
                                   insertbackground=C["body"],
@@ -83,7 +128,10 @@ class PasswordEditorDialog(tk.Toplevel):
                                   selectbackground=C["blue"],
                                   selectforeground=C["canvas"])
         self._add_text.pack(fill=tk.X, padx=12, pady=(0, 4))
-        ttk.Button(self, text="添加以上密码", command=self._add_passwords).pack(padx=12, pady=(0, 8), anchor="e")
+        btn_row = ttk.Frame(self)
+        btn_row.pack(fill=tk.X, padx=12, pady=(0, 8))
+        ttk.Button(btn_row, text="导入文件...", command=self._import_file).pack(side=tk.LEFT)
+        ttk.Button(btn_row, text="添加以上密码", command=self._add_passwords).pack(side=tk.RIGHT)
 
         # Password list
         list_frame = ttk.Frame(self)
@@ -111,6 +159,51 @@ class PasswordEditorDialog(tk.Toplevel):
         if self._on_change:
             self._on_change()
         self.destroy()
+
+    def _on_drop_enter(self, event):
+        self._drop_frame.configure(highlightbackground=self._C["blue"])
+        self._drop_hint.configure(text="释放以导入密码文件", fg=self._C["blue"])
+
+    def _on_drop_leave(self, event):
+        self._drop_frame.configure(highlightbackground=self._C["hairline"])
+        self._drop_hint.configure(text="拖入 .txt 文件到此处自动导入 (一行一个密码)",
+                                  fg=self._C["mute"])
+
+    def _on_drop_files(self, files):
+        self._on_drop_leave(None)
+        added_total = 0
+        for f in files:
+            if isinstance(f, bytes):
+                f = f.decode("gbk", errors="replace")
+            p = f.strip()
+            if p:
+                added = self._import_password_file(p)
+                added_total += added
+        if added_total > 0:
+            self._refresh_list()
+            self._status_label.configure(text=f"已从拖入文件导入 {added_total} 个密码")
+
+    def _import_password_file(self, path_str: str) -> int:
+        """Import passwords from a text file (one per line). Returns count added."""
+        try:
+            with open(path_str, "r", encoding="utf-8", errors="replace") as fh:
+                content = fh.read()
+        except Exception:
+            return 0
+        return self._pm.add_multiple(content)
+
+    def _import_file(self):
+        path = filedialog.askopenfilename(
+            parent=self, title="导入密码文件",
+            filetypes=[("文本文件", "*.txt"), ("所有文件", "*.*")],
+        )
+        if path:
+            added = self._import_password_file(path)
+            if added:
+                self._refresh_list()
+                self._status_label.configure(text=f"已导入 {added} 个密码")
+            else:
+                self._status_label.configure(text="文件无有效密码或密码已存在")
 
     def _refresh_list(self):
         self._listbox.delete(0, tk.END)
@@ -157,11 +250,11 @@ class SmartExtractorApp:
         self.root.title("智能解压工具")
         self.root.geometry("900x700")
         self.root.minsize(800, 550)
+        self.root.withdraw()  # hide until positioned at mouse
 
         self._files: list[ArchiveFileItem] = []
         self._completed: list[ArchiveFileItem] = []
         self._recycled_items: list[tuple[str, float]] = []  # (original_path, timestamp)
-        self._output_dir = Path.home() / "Extracted"
         self._password_manager = PasswordManager()
         if getattr(sys, "frozen", False):
             exe_dir = Path(sys.executable).resolve().parent
@@ -178,8 +271,11 @@ class SmartExtractorApp:
         self._auto_rename = tk.BooleanVar(value=True)
         self._auto_password = tk.BooleanVar(value=True)
         self._delete_mode = tk.StringVar(value="none")  # "none" | "delete" | "recycle"
-        self._wrap_folder = tk.BooleanVar(value=True)
+        self._output_mode = tk.StringVar(value="subfolder")  # "flat" | "subfolder"
+        self._subfolder_name = tk.StringVar(value="")
+        self._output_dir = tk.StringVar(value="")
         self._open_after = tk.BooleanVar(value=False)
+        self._pwd_overlays: list[tk.Frame] = []
         self._cancel_flag = threading.Event()
         self._current_thread: threading.Thread | None = None
         self._theme = tk.StringVar(value="slate")
@@ -188,7 +284,19 @@ class SmartExtractorApp:
         self._apply_theme()
         self._load_persistent_passwords()
         self._update_pwd_count_display()
+        self._update_output_preview()
         self._refresh_status()
+        # Center on the screen where the mouse cursor is
+        self.root.update_idletasks()
+        w = self.root.winfo_width()
+        h = self.root.winfo_height()
+        mx = self.root.winfo_pointerx()
+        my = self.root.winfo_pointery()
+        ml, mt, mr, mb = _get_monitor_work_area(mx, my)
+        left = ml + (mr - ml - w) // 2
+        top = mt + (mb - mt - h) // 2
+        self.root.geometry(f"+{left}+{top}")
+        self.root.deiconify()
 
     # ============================================================
     #  UI Construction
@@ -220,19 +328,29 @@ class SmartExtractorApp:
         pending_frame.pack(side=tk.LEFT, fill=tk.BOTH, expand=True)
 
         self._tree_pending = ttk.Treeview(pending_frame,
-                                          columns=("#", "文件名", "格式", "操作"),
+                                          columns=("#", "文件名", "格式", "密码", "文件路径"),
                                           show="headings", selectmode="extended", height=6)
         self._tree_pending.column("#", width=28, anchor="center")
-        self._tree_pending.column("文件名", width=200)
-        self._tree_pending.column("格式", width=70, anchor="center")
-        self._tree_pending.column("操作", width=110, anchor="center")
-        for c in ("#", "文件名", "格式", "操作"):
+        self._tree_pending.column("文件名", width=160)
+        self._tree_pending.column("格式", width=56, anchor="center")
+        self._tree_pending.column("密码", width=70, anchor="center")
+        self._tree_pending.column("文件路径", width=200)
+        for c in ("#", "文件名", "格式", "密码", "文件路径"):
             self._tree_pending.heading(c, text=c)
 
-        p_scroll = ttk.Scrollbar(pending_frame, orient=tk.VERTICAL, command=self._tree_pending.yview)
+        p_scroll = ttk.Scrollbar(pending_frame, orient=tk.VERTICAL,
+                                  command=self._on_tree_scroll)
         self._tree_pending.configure(yscrollcommand=p_scroll.set)
         self._tree_pending.pack(side=tk.LEFT, fill=tk.BOTH, expand=True)
         p_scroll.pack(side=tk.RIGHT, fill=tk.Y)
+        self._tree_pending.bind("<Configure>", lambda e: self._tree_pending.after_idle(self._create_pwd_overlays))
+
+        # Drop hint — placed inside treeview area, hidden when files exist
+        self._pending_drop_hint = tk.Label(self._tree_pending,
+            text="拖入文件/文件夹到此处添加",
+            bg=self._C["surface"], fg=self._C["mute"],
+            font=("Segoe UI", 11))
+        self._pending_drop_hint.place(relx=0.5, rely=0.5, anchor="center")
 
         # Right-click menu for pending
         self._pwd_menu = tk.Menu(self.root, tearoff=0,
@@ -242,7 +360,14 @@ class SmartExtractorApp:
                                  font=("Segoe UI", 10))
         self._pwd_menu.add_command(label="设置密码...", command=self._set_file_password)
         self._pwd_menu.add_command(label="清除密码", command=self._clear_file_password)
+        self._pwd_menu.add_separator()
+        self._pwd_menu.add_command(label="复制路径", command=self._copy_file_path)
+        self._pwd_menu.add_command(label="破解密码...", command=self._open_crack_from_menu)
+        self._pwd_edit_entry: tk.Entry | None = None
+        self._pwd_edit_iid: str | None = None
         self._tree_pending.bind("<Button-3>", self._on_pending_right_click)
+        self._tree_pending.bind("<Button-1>", self._on_tree_click)
+        self._tree_pending.bind("<Control-c>", lambda e: self._copy_file_path())
 
         # Right panel: completed
         done_frame = ttk.LabelFrame(list_frame, text="已解压", padding=4)
@@ -262,31 +387,33 @@ class SmartExtractorApp:
         self._tree_done.pack(side=tk.LEFT, fill=tk.BOTH, expand=True)
         d_scroll.pack(side=tk.RIGHT, fill=tk.Y)
 
-        # --- Toolbar below panels ---
-        toolbar = ttk.Frame(self.root)
-        toolbar.pack(fill=tk.X, padx=12, pady=(0, 8))
-        ttk.Button(toolbar, text="添加文件", command=self._add_files).pack(side=tk.LEFT, padx=(0, 4))
-        ttk.Button(toolbar, text="添加文件夹", command=self._add_directory).pack(side=tk.LEFT, padx=4)
-        ttk.Button(toolbar, text="移除选中", command=self._remove_selected).pack(side=tk.LEFT, padx=4)
-        ttk.Button(toolbar, text="清空列表", command=self._clear_pending).pack(side=tk.LEFT, padx=4)
-        ttk.Button(toolbar, text="从回收站还原", command=self._open_recycle_restore).pack(side=tk.LEFT, padx=4)
-        ttk.Button(toolbar, text="清空已完成", command=self._clear_completed).pack(side=tk.LEFT, padx=4)
+        # --- Toolbars below panels (left = pending, right = done) ---
+        toolbar_frame = ttk.Frame(self.root)
+        toolbar_frame.pack(fill=tk.X, padx=12, pady=(0, 8))
+
+        # Left toolbar — aligned with pending panel
+        toolbar_left = ttk.Frame(toolbar_frame)
+        toolbar_left.pack(side=tk.LEFT)
+        ttk.Button(toolbar_left, text="添加文件", command=self._add_files).pack(side=tk.LEFT, padx=(0, 4))
+        ttk.Button(toolbar_left, text="添加文件夹", command=self._add_directory).pack(side=tk.LEFT, padx=4)
+        ttk.Button(toolbar_left, text="移除选中", command=self._remove_selected).pack(side=tk.LEFT, padx=4)
+        ttk.Button(toolbar_left, text="清空列表", command=self._clear_pending).pack(side=tk.LEFT, padx=4)
+
+        # Right toolbar — aligned with done panel
+        toolbar_right = ttk.Frame(toolbar_frame)
+        toolbar_right.pack(side=tk.RIGHT)
+        ttk.Button(toolbar_right, text="清空已完成", command=self._clear_completed).pack(side=tk.RIGHT, padx=4)
+        ttk.Button(toolbar_right, text="打开回收站", command=self._open_recycle_restore).pack(side=tk.RIGHT, padx=4)
 
         # --- Options panel ---
         opt_frame = ttk.LabelFrame(self.root, text="选项", padding=(12, 10))
         opt_frame.pack(fill=tk.X, padx=12, pady=(0, 8))
 
-        row1 = ttk.Frame(opt_frame)
-        row1.pack(fill=tk.X, pady=(0, 6))
-        ttk.Label(row1, text="输出目录").pack(side=tk.LEFT)
-        self._output_var = tk.StringVar(value=str(self._output_dir))
-        ttk.Entry(row1, textvariable=self._output_var, width=50).pack(side=tk.LEFT, fill=tk.X, expand=True, padx=8)
-        ttk.Button(row1, text="浏览", command=self._browse_output).pack(side=tk.LEFT)
-
         row2 = ttk.Frame(opt_frame)
         row2.pack(fill=tk.X, pady=6)
         ttk.Label(row2, text="密码字典").pack(side=tk.LEFT)
         ttk.Button(row2, text="编辑", command=self._open_password_editor).pack(side=tk.LEFT, padx=(8, 4))
+        ttk.Button(row2, text="密码破解", command=self._open_crack_dialog).pack(side=tk.RIGHT)
         ttk.Button(row2, text="导出", command=self._export_passwords).pack(side=tk.LEFT, padx=4)
 
         row3 = ttk.Frame(opt_frame)
@@ -302,8 +429,34 @@ class SmartExtractorApp:
         row4 = ttk.Frame(opt_frame)
         row4.pack(fill=tk.X, pady=6)
         ttk.Label(row4, text="输出方式").pack(side=tk.LEFT)
-        ttk.Radiobutton(row4, text="解压到压缩包目录", variable=self._wrap_folder, value=False).pack(side=tk.LEFT, padx=(8, 16))
-        ttk.Radiobutton(row4, text="解压到同名文件夹", variable=self._wrap_folder, value=True).pack(side=tk.LEFT)
+        ttk.Radiobutton(row4, text="解压到目录", variable=self._output_mode,
+                        value="flat", command=self._update_output_preview).pack(side=tk.LEFT, padx=(8, 8))
+        ttk.Radiobutton(row4, text="解压到同名/", variable=self._output_mode,
+                        value="subfolder", command=self._update_output_preview).pack(side=tk.LEFT)
+        self._subfolder_entry = tk.Entry(row4, textvariable=self._subfolder_name,
+                                          bg=self._C["surface"], fg=self._C["body"],
+                                          insertbackground=self._C["body"],
+                                          font=("Segoe UI", 10),
+                                          relief="solid", borderwidth=1, width=12)
+        self._subfolder_entry.pack(side=tk.LEFT, padx=(2, 0))
+        self._subfolder_name.trace_add("write", self._update_output_preview)
+        ttk.Label(row4, text=" 文件夹（留空=压缩包名）").pack(side=tk.LEFT)
+
+        # Output directory
+        row4b = ttk.Frame(opt_frame)
+        row4b.pack(fill=tk.X, pady=(2, 6))
+        ttk.Label(row4b, text="输出目录:").pack(side=tk.LEFT)
+        self._output_dir_entry = tk.Entry(row4b,
+                                           bg=self._C["surface"], fg=self._C["mute"],
+                                           insertbackground=self._C["body"],
+                                           font=("Segoe UI", 10),
+                                           relief="solid", borderwidth=1)
+        self._output_dir_entry.pack(side=tk.LEFT, fill=tk.X, expand=True, padx=(6, 4))
+        self._output_dir_entry.insert(0, "留空则默认输出到压缩包路径")
+        self._output_dir_entry.bind("<FocusIn>", self._on_output_dir_focus_in)
+        self._output_dir_entry.bind("<FocusOut>", self._on_output_dir_focus_out)
+        self._output_dir_entry.bind("<KeyRelease>", self._on_output_dir_key)
+        ttk.Button(row4b, text="浏览...", command=self._browse_output_dir).pack(side=tk.LEFT)
 
         row5 = ttk.Frame(opt_frame)
         row5.pack(fill=tk.X, pady=(6, 0))
@@ -422,6 +575,12 @@ class SmartExtractorApp:
                 activeforeground=C["ink"],
                 highlightthickness=0,
                 font=("Segoe UI", 10),
+            )
+
+        for entry in [self._subfolder_entry, self._output_dir_entry]:
+            entry.configure(
+                bg=C["surface"], fg=C["body"],
+                insertbackground=C["body"],
             )
 
         style.configure("TRadiobutton", background=C["canvas"], foreground=C["body"],
@@ -552,9 +711,6 @@ class SmartExtractorApp:
             item.volume_count = len(vols)
         self._files.append(item)
         self._refresh_pending_list()
-        if len(self._files) == 1:
-            self._output_dir = item.path.parent
-            self._output_var.set(str(self._output_dir))
 
     def _remove_selected(self):
         selected = self._tree_pending.selection()
@@ -576,20 +732,67 @@ class SmartExtractorApp:
 
     def _refresh_pending_list(self):
         self._tree_pending.delete(*self._tree_pending.get_children())
+        self._destroy_pwd_overlays()
         for i, f in enumerate(self._files):
-            action_parts = []
-            if f.will_rename:
-                action_parts.append(f"改名→{f.target_name}")
-            if f.specific_password:
-                action_parts.append("有密码")
-            if f.is_split and f.volume_count > 1:
-                action_parts.append(f"分卷({f.volume_count})")
-            if not action_parts and f.detected_format != "未知":
-                action_parts.append("直接解压")
-            action = " ".join(action_parts)
+            pwd_display = f.specific_password if f.specific_password else "□"
 
             self._tree_pending.insert("", "end", iid=str(i),
-                                      values=(i + 1, f.path.name, f.detected_format, action))
+                                      values=(i + 1, f.path.name, f.detected_format,
+                                              pwd_display, str(f.path.parent)))
+        # Auto-select all pending files, toggle drop hint
+        all_iids = self._tree_pending.get_children()
+        if all_iids:
+            self._tree_pending.selection_set(all_iids)
+            self._pending_drop_hint.place_forget()
+        else:
+            self._pending_drop_hint.place(relx=0.5, rely=0.5, anchor="center")
+        self._update_output_preview()
+        self._tree_pending.after_idle(self._create_pwd_overlays)
+
+    def _on_tree_scroll(self, *args):
+        """Scroll handler that also refreshes pwd overlays."""
+        self._tree_pending.yview(*args)
+        self._tree_pending.after_idle(self._create_pwd_overlays)
+
+    # ── Password cell overlay boxes ──────────────────────────────
+
+    def _create_pwd_overlays(self):
+        """Draw subtle border boxes over password cells."""
+        self._destroy_pwd_overlays()
+        self._pwd_overlays = []
+        C = self._C
+        inset = 2  # px inset from cell edge
+        for iid in self._tree_pending.get_children():
+            bbox = self._tree_pending.bbox(iid, "密码")
+            if not bbox:
+                continue
+            x, y, w, h = bbox
+            f = tk.Frame(self._tree_pending, bg=C["hairline"],
+                         width=w - inset * 2, height=h - inset * 2)
+            f.place(x=x + inset, y=y + inset, width=w - inset * 2, height=h - inset * 2)
+            f.bind("<Button-1>", lambda e, i=iid: self._on_overlay_click(i))
+            f.bind("<Enter>", lambda e, fr=f: fr.configure(bg=C["mute"]))
+            f.bind("<Leave>", lambda e, fr=f: fr.configure(bg=C["hairline"]))
+            # Inner fill (gives the "hollow box" appearance)
+            inner = tk.Frame(f, bg=C["canvas"], width=(w - inset * 2) - 2,
+                             height=(h - inset * 2) - 2)
+            inner.place(x=1, y=1, relwidth=1, relheight=1, width=-2, height=-2)
+            for wgt in (f, inner):
+                wgt.bind("<Button-1>", lambda e, i=iid: self._on_overlay_click(i))
+            self._pwd_overlays.append(f)
+
+    def _destroy_pwd_overlays(self):
+        for f in getattr(self, "_pwd_overlays", []):
+            try:
+                f.destroy()
+            except Exception:
+                pass
+        self._pwd_overlays = []
+
+    def _on_overlay_click(self, iid: str):
+        """Handle click on password overlay box."""
+        self._tree_pending.selection_set(iid)
+        self._tree_pending.after(50, lambda: self._begin_pwd_edit(iid))
 
     def _refresh_completed_list(self):
         self._tree_done.delete(*self._tree_done.get_children())
@@ -613,6 +816,76 @@ class SmartExtractorApp:
             if iid not in self._tree_pending.selection():
                 self._tree_pending.selection_set(iid)
             self._pwd_menu.post(event.x_root, event.y_root)
+
+    def _copy_file_path(self):
+        """Copy the path of selected pending files to clipboard."""
+        selected = self._tree_pending.selection()
+        if not selected:
+            return
+        paths = []
+        for iid in selected:
+            idx = int(iid)
+            if 0 <= idx < len(self._files):
+                paths.append(str(self._files[idx].path))
+        if paths:
+            self.root.clipboard_clear()
+            self.root.clipboard_append("\n".join(paths))
+
+    def _on_tree_click(self, event):
+        """Handle left-click: if on password column, start inline edit."""
+        self._end_pwd_edit()
+        region = self._tree_pending.identify_region(event.x, event.y)
+        if region != "cell":
+            return
+        col = self._tree_pending.identify_column(event.x)
+        if col != "#4":  # password column
+            return
+        iid = self._tree_pending.identify_row(event.y)
+        if not iid:
+            return
+        self._begin_pwd_edit(iid)
+
+    def _begin_pwd_edit(self, iid: str):
+        """Overlay an Entry widget on the password cell."""
+        idx = int(iid)
+        if idx < 0 or idx >= len(self._files):
+            return
+        bbox = self._tree_pending.bbox(iid, "密码")
+        if not bbox:
+            return
+        x, y, w, h = bbox
+        current = self._files[idx].specific_password
+        entry = tk.Entry(self._tree_pending,
+                         bg=self._C["surface"], fg=self._C["body"],
+                         insertbackground=self._C["body"],
+                         font=("Segoe UI", 10),
+                         relief="solid", borderwidth=1)
+        entry.place(x=x, y=y, width=w, height=h)
+        entry.insert(0, current)
+        entry.focus_set()
+        entry.bind("<Return>", lambda e: self._end_pwd_edit(save=True))
+        entry.bind("<Escape>", lambda e: self._end_pwd_edit(save=False))
+        entry.bind("<FocusOut>", lambda e: self._end_pwd_edit(save=True))
+        self._pwd_edit_entry = entry
+        self._pwd_edit_iid = iid
+
+    def _end_pwd_edit(self, save: bool = True):
+        """Destroy overlay entry. If save, persist the password."""
+        if self._pwd_edit_entry is None:
+            return
+        if save and self._pwd_edit_iid is not None:
+            idx = int(self._pwd_edit_iid)
+            if 0 <= idx < len(self._files):
+                pwd = self._pwd_edit_entry.get().strip()
+                self._files[idx].specific_password = pwd
+        try:
+            self._pwd_edit_entry.destroy()
+        except Exception:
+            pass
+        self._pwd_edit_entry = None
+        self._pwd_edit_iid = None
+        if save:
+            self._refresh_pending_list()
 
     def _set_file_password(self):
         selected = self._tree_pending.selection()
@@ -642,16 +915,11 @@ class SmartExtractorApp:
     #  Options
     # ============================================================
 
-    def _browse_output(self):
-        path = filedialog.askdirectory(title="选择输出目录")
-        if path:
-            self._output_dir = Path(path)
-            self._output_var.set(str(self._output_dir))
-
     def _open_password_editor(self):
-        PasswordEditorDialog(self.root, self._password_manager,
-                             app_colors=self._C,
-                             on_change=lambda: None)
+        dlg = PasswordEditorDialog(self.root, self._password_manager,
+                                    app_colors=self._C,
+                                    on_change=lambda: None)
+        self._position_dialog(dlg, side="left")
         self._update_pwd_count_display()
 
     def _export_passwords(self):
@@ -682,24 +950,79 @@ class SmartExtractorApp:
         else:
             self._pwd_count_label.configure(text="(暂无密码)")
 
+    def _get_default_output_dir(self) -> Path | None:
+        """Return the parent directory of the first pending file, or None."""
+        if self._files:
+            return self._files[0].path.parent
+        return None
+
+    def _update_output_preview(self, *_):
+        pass
+
+    def _on_output_dir_focus_in(self, event):
+        """Clear placeholder when user clicks into the output dir entry."""
+        if self._output_dir_entry.get() == "留空则默认输出到压缩包路径":
+            self._output_dir_entry.delete(0, "end")
+            self._output_dir_entry.configure(fg=self._C["body"])
+
+    def _on_output_dir_key(self, event):
+        """Sync entry content to _output_dir on each keystroke."""
+        text = self._output_dir_entry.get().strip()
+        if text == "留空则默认输出到压缩包路径":
+            self._output_dir.set("")
+        else:
+            self._output_dir.set(text)
+
+    def _on_output_dir_focus_out(self, event):
+        """Restore placeholder if user left the entry empty."""
+        if not self._output_dir_entry.get().strip():
+            self._output_dir.set("")
+            self._output_dir_entry.delete(0, "end")
+            self._output_dir_entry.insert(0, "留空则默认输出到压缩包路径")
+            self._output_dir_entry.configure(fg=self._C["mute"])
+
+    def _browse_output_dir(self):
+        """Open folder picker to override the output directory."""
+        current = self._output_dir.get() or str(self._get_default_output_dir() or ".")
+        path = filedialog.askdirectory(title="选择输出目录", initialdir=current)
+        if path:
+            self._output_dir.set(path)
+            self._output_dir_entry.delete(0, "end")
+            self._output_dir_entry.insert(0, path)
+            self._output_dir_entry.configure(fg=self._C["body"])
+
+    def _get_output_path(self, item) -> Path:
+        """Compute the output directory for an archive item."""
+        override = self._output_dir.get()
+        base_dir = Path(override) if override else item.path.parent
+        if self._output_mode.get() == "subfolder":
+            name = self._subfolder_name.get().strip() or item.path.stem
+            return base_dir / name
+        else:
+            return base_dir
+
     # ============================================================
     #  Extraction flow
     # ============================================================
 
+    def _get_selected_items(self) -> list[ArchiveFileItem]:
+        """Return file items selected in the pending treeview."""
+        selected = self._tree_pending.selection()
+        items = []
+        for iid in selected:
+            idx = int(self._tree_pending.index(iid))
+            if 0 <= idx < len(self._files):
+                items.append(self._files[idx])
+        return items
+
     def _start_extraction(self):
-        if not self._files:
-            messagebox.showinfo("提示", "请先添加要解压的文件")
+        selected_items = self._get_selected_items()
+        if not selected_items:
+            messagebox.showinfo("提示", "请先在待解压列表中选中要解压的文件（蓝色项）")
             return
-        output = Path(self._output_var.get())
-        if not output.exists():
-            try:
-                output.mkdir(parents=True, exist_ok=True)
-            except Exception as e:
-                messagebox.showerror("错误", f"无法创建输出目录: {e}")
-                return
-        pending = [f for f in self._files if f.status not in ("done", "processing")]
+        pending = [f for f in selected_items if f.status not in ("done", "processing")]
         if not pending:
-            if messagebox.askyesno("提示", "所有文件已处理完毕，是否重新解压？"):
+            if messagebox.askyesno("提示", "所选文件已处理完毕，是否重新解压？"):
                 # Move completed back to pending
                 self._files.extend(self._completed)
                 self._completed.clear()
@@ -716,7 +1039,7 @@ class SmartExtractorApp:
         self._progress.configure(value=0)
         self._logger.log("=" * 50)
         self._logger.log("开始解压任务...")
-        self._current_thread = threading.Thread(target=self._extraction_worker, args=(output,), daemon=True)
+        self._current_thread = threading.Thread(target=self._extraction_worker, daemon=True)
         self._current_thread.start()
 
     def _stop_extraction(self):
@@ -804,17 +1127,13 @@ class SmartExtractorApp:
                 self._ui_log(f"  已尝试 {tried}/{len(passwords)} 个密码...")
         return (False, None, "密码字典未找到正确密码")
 
-    def _extract_one(self, archive_path, item, output):
+    def _extract_one(self, archive_path, item):
         """Extract one archive. Returns (output_dir, password_used).
 
-        Output always goes to the archive's original directory.
-        'wrap_folder' controls whether a subfolder named after the archive is created.
+        Output directory is determined by output_mode, subfolder_name, and
+        optional output_dir override.
         """
-        base_dir = item.path.parent
-        if self._wrap_folder.get():
-            item_output = base_dir / item.path.stem
-        else:
-            item_output = base_dir
+        item_output = self._get_output_path(item)
         item_output.mkdir(parents=True, exist_ok=True)
         auto_pwd = self._auto_password.get()
         final_password = None
@@ -832,6 +1151,7 @@ class SmartExtractorApp:
                                  progress_callback=progress_cb)
                 if result.success:
                     self._ui_log(f"  ✓ 指定密码正确")
+                    self._save_password_to_library(item.specific_password)
                     item.status = "done"
                     return (str(item_output), item.specific_password)
                 elif result.password_wrong:
@@ -872,6 +1192,7 @@ class SmartExtractorApp:
             success, pwd, err = self._try_password_list(archive_path, item_output, passwords, progress_cb)
             if success:
                 self._ui_log(f"  ✓ 找到密码: {pwd}")
+                self._save_password_to_library(pwd)
                 final_password = pwd
                 item.status = "done"
             else:
@@ -991,15 +1312,19 @@ class SmartExtractorApp:
                     pass
 
         # Output dir
-        if self._wrap_folder.get():
-            stem = Path(first_vol.name).stem
-            stem = re.sub(r'\.part\d+', '', stem, flags=re.IGNORECASE)
-            stem = re.sub(r'\.r\d{2,}$', '', stem, flags=re.IGNORECASE)
-            stem = re.sub(r'\.\d{3,}$', '', stem, flags=re.IGNORECASE)
-            stem = stem.rstrip('.') or first_vol.stem
-            nest_output = first_vol.parent / stem
+        override = self._output_dir.get()
+        base_dir = Path(override) if override else first_vol.parent
+        if self._output_mode.get() == "subfolder":
+            name = self._subfolder_name.get().strip()
+            if not name:
+                stem = Path(first_vol.name).stem
+                stem = re.sub(r'\.part\d+', '', stem, flags=re.IGNORECASE)
+                stem = re.sub(r'\.r\d{2,}$', '', stem, flags=re.IGNORECASE)
+                stem = re.sub(r'\.\d{3,}$', '', stem, flags=re.IGNORECASE)
+                name = stem.rstrip('.') or first_vol.stem
+            nest_output = base_dir / name
         else:
-            nest_output = first_vol.parent
+            nest_output = base_dir
         nest_output.mkdir(parents=True, exist_ok=True)
 
         # Extract
@@ -1118,7 +1443,7 @@ class SmartExtractorApp:
     #  Extraction worker
     # ============================================================
 
-    def _extraction_worker(self, output: Path):
+    def _extraction_worker(self):
         # Iterate a snapshot since we mutate self._files during the loop
         snapshot = list(self._files)
         all_to_delete: list[Path] = []
@@ -1173,11 +1498,11 @@ class SmartExtractorApp:
                     else:
                         self._ui_log(f"  ⚠ 目标文件已存在，跳过改名")
 
-            # Step 4: Snapshot pre-existing files BEFORE extraction (for wrap_folder=False)
-            pre_output = item.path.parent / item.path.stem if self._wrap_folder.get() else item.path.parent
+            # Step 4: Snapshot pre-existing files BEFORE extraction
+            pre_output = self._get_output_path(item)
             pre_existing = {p.resolve() for p in pre_output.iterdir()} if pre_output.is_dir() else set()
 
-            item_output, parent_pwd = self._extract_one(first_vol, item, output)
+            item_output, parent_pwd = self._extract_one(first_vol, item)
             item.output_path = item_output
 
             # Step 5: Collect outer archive paths for deferred deletion
@@ -1239,17 +1564,92 @@ class SmartExtractorApp:
                 os.startfile(last.output_path)
 
     def _open_recycle_restore(self):
-        """Open the recycle bin restore dialog."""
-        if not self._recycled_items:
-            messagebox.showinfo("提示", "当前没有回收站记录", parent=self.root)
-            return
-        RecycleBinRestoreDialog(self.root, self._recycled_items,
-                                app_colors=self._C,
-                                on_restore=self._on_recycled_items_changed)
+        """Open Windows recycle bin."""
+        import subprocess
+        subprocess.Popen(["explorer", "shell:RecycleBinFolder"])
 
     def _on_recycled_items_changed(self, remaining):
         """Callback when recycle items list is modified by restore dialog."""
         self._recycled_items[:] = remaining
+
+    # ============================================================
+    #  Password cracking
+    # ============================================================
+
+    def _get_selected_file_path(self) -> str | None:
+        """Return the path of the first selected pending file."""
+        selected = self._tree_pending.selection()
+        if not selected:
+            return None
+        idx = int(self._tree_pending.index(selected[0]))
+        if 0 <= idx < len(self._files):
+            return str(self._files[idx].path)
+        return None
+
+    def _open_crack_from_menu(self):
+        """Open crack dialog from right-click menu."""
+        path = self._get_selected_file_path()
+        if not path:
+            return
+        self._open_crack_dialog_for_path(path)
+
+    def _open_crack_dialog(self):
+        """Open crack dialog from toolbar button (uses first pending file)."""
+        path = self._get_selected_file_path()
+        if not path:
+            messagebox.showinfo("提示", "请先选择待解压列表中的文件", parent=self.root)
+            return
+        self._open_crack_dialog_for_path(path)
+
+    def _open_crack_dialog_for_path(self, archive_path: str):
+        """Open the crack dialog for a specific archive file."""
+        dlg = CrackDialog(self.root, archive_path,
+                          app_colors=self._C,
+                          on_password_found=lambda pwd: self._on_crack_password_found(archive_path, pwd))
+        self._position_dialog(dlg, side="right")
+
+    @staticmethod
+    def _position_dialog(dialog: tk.Toplevel, side: str = "left"):
+        """Snap dialog to main-window midline, vertically centered."""
+        dialog.withdraw()
+        dialog.update_idletasks()
+        master = dialog.master
+        m_x = master.winfo_rootx()
+        m_y = master.winfo_rooty()
+        m_w = master.winfo_width()
+        m_h = master.winfo_height()
+        # Actual size (1 means unmapped → fall back to requested)
+        d_w = dialog.winfo_width()
+        d_h = dialog.winfo_height()
+        if d_w <= 1:
+            d_w = dialog.winfo_reqwidth()
+        if d_h <= 1:
+            d_h = dialog.winfo_reqheight()
+        mid_x = m_x + m_w // 2
+        top = m_y + (m_h - d_h) // 2
+        if side == "left":
+            left = mid_x - d_w   # right edge touches midline
+        else:
+            left = mid_x         # left edge touches midline
+        dialog.geometry(f"{d_w}x{d_h}+{max(0, left)}+{max(0, top)}")
+        dialog.deiconify()
+
+    def _save_password_to_library(self, password: str):
+        """Save a working password to the password library."""
+        if password and password not in self._password_manager.get_all_passwords():
+            self._password_manager.add(password)
+            self._update_pwd_count_display()
+
+    def _on_crack_password_found(self, archive_path: str, password: str):
+        """When password is cracked, set it on the matching file item and save to library."""
+        norm = str(Path(archive_path).resolve())
+        for f in self._files:
+            if str(f.path.resolve()) == norm:
+                f.specific_password = password
+                self._logger.log(f"密码已填入: {f.path.name}")
+                break
+        self._save_password_to_library(password)
+        self._refresh_pending_list()
 
     # ============================================================
     #  UI helpers
@@ -1364,37 +1764,45 @@ class RecycleBinRestoreDialog(tk.Toplevel):
         return sid_str.value
 
     def _scan_recycle_bin(self, target_paths: set) -> dict:
-        """Scan recycle bin. Returns {original_path: r_file_path} for matches."""
+        """Scan recycle bin on relevant drives. Returns {original_path: r_file_path}."""
         sid = self._get_user_sid()
         if not sid:
             return {}
-        rb_dir = Path(f"C:/$Recycle.Bin/{sid}")
-        if not rb_dir.is_dir():
-            return {}
+
+        # Collect unique drives from target paths
+        drives = set()
+        for p in target_paths:
+            if len(p) >= 2 and p[1] == ":":
+                drives.add(p[0].upper())
+
         import struct
         matches = {}
-        for f in rb_dir.iterdir():
-            if not f.name.startswith("$I"):
+        for drive in drives:
+            rb_dir = Path(f"{drive}:/$Recycle.Bin/{sid}")
+            if not rb_dir.is_dir():
                 continue
-            try:
-                data = f.read_bytes()
-                if len(data) < 28:
+            for f in rb_dir.iterdir():
+                if not f.name.startswith("$I"):
                     continue
-                header = struct.unpack_from("<Q", data, 0)[0]
-                if header != 2:
+                try:
+                    data = f.read_bytes()
+                    if len(data) < 28:
+                        continue
+                    header = struct.unpack_from("<Q", data, 0)[0]
+                    if header != 2:
+                        continue
+                    path_len = struct.unpack_from("<I", data, 24)[0]
+                    if 28 + path_len * 2 > len(data):
+                        continue
+                    raw = data[28:28 + path_len * 2]
+                    orig = raw.decode("utf-16-le")
+                    norm = str(Path(orig).resolve())
+                    if norm in target_paths:
+                        r_file = rb_dir / ("$R" + f.name[2:])
+                        if r_file.is_file():
+                            matches[norm] = r_file
+                except Exception:
                     continue
-                path_len = struct.unpack_from("<I", data, 24)[0]
-                if 28 + path_len * 2 > len(data):
-                    continue
-                raw = data[28:28 + path_len * 2]
-                orig = raw.decode("utf-16-le")
-                norm = str(Path(orig).resolve())
-                if norm in target_paths:
-                    r_file = rb_dir / ("$R" + f.name[2:])
-                    if r_file.is_file():
-                        matches[norm] = r_file
-            except Exception:
-                continue
         return matches
 
     def _restore_selected(self):
@@ -1403,27 +1811,49 @@ class RecycleBinRestoreDialog(tk.Toplevel):
             return
         indices = sorted([int(self._tree.index(iid)) for iid in selected])
         target_paths = {str(Path(self._items[i][0]).resolve()) for i in indices if 0 <= i < len(self._items)}
+
+        # Debug: check SID and drives
+        sid = self._get_user_sid()
+        drives = set()
+        for p in target_paths:
+            if len(p) >= 2 and p[1] == ":":
+                drives.add(p[0].upper())
+
         matches = self._scan_recycle_bin(target_paths)
 
         restored_indices = set()
         failed = 0
+        errors = []
         for idx in reversed(indices):
             if idx < 0 or idx >= len(self._items):
                 continue
             path_str, ts = self._items[idx]
             norm = str(Path(path_str).resolve())
             r_file = matches.get(norm)
-            if r_file and self._restore_file(r_file, path_str):
+            if not r_file:
+                errors.append(f"未在回收站找到: {Path(path_str).name}")
+                failed += 1
+                continue
+            if self._restore_file(r_file, path_str):
                 restored_indices.add(idx)
             else:
+                errors.append(f"还原失败: {Path(path_str).name}")
                 failed += 1
 
         remaining = [item for i, item in enumerate(self._items) if i not in restored_indices]
         self._items[:] = remaining
         self._populate()
-        self._status_label.configure(
-            text=f"已还原 {len(restored_indices)} 个文件" +
-                 (f"，{failed} 个失败（可能已清空回收站）" if failed else ""))
+
+        msg = f"已还原 {len(restored_indices)} 个文件"
+        if failed:
+            msg += f"，{failed} 个失败"
+        # Append debug info
+        msg += f" | SID: {sid[:12] if sid else '无'}..."
+        msg += f" 盘符: {','.join(sorted(drives)) if drives else '无'}"
+        msg += f" 匹配: {len(matches)}/{len(target_paths)}"
+        if errors:
+            msg += f" ({'; '.join(errors[:2])})"
+        self._status_label.configure(text=msg)
         if self._on_restore:
             self._on_restore(remaining)
 
