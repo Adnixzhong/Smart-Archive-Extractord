@@ -45,8 +45,21 @@
 
 ## 安装与运行
 
-### 依赖
+### 预打包版本（GitHub Releases）
 
+从 [Releases](https://github.com/Adnixzhong/Smart-Archive-Extractord/releases) 下载：
+
+| 版本 | 文件 | 大小 | 说明 |
+|------|------|------|------|
+| 单文件版 | `SmartArchiveExtractor-Nuitka.exe` | ~37 MB | Nuitka C 编译单文件，启动快，密码库和配置在 `%APPDATA%` |
+| 便携版 | `SmartArchiveExtractor-Nuitka-Portable.zip` | ~15 MB | Nuitka C 编译，解压即用，密码库和配置在 EXE 同目录 |
+
+> 密码库文件位置可在程序内修改（.txt 文件）。
+> 打包版本仍需目标机器安装 7-Zip。
+
+### 源码运行
+
+**依赖**
 - **Python 3.9+**（推荐 3.13）
 - **7-Zip** — 安装到 `C:\Program Files\7-Zip\` 或确保 `7z.exe` 在 PATH 中
 - **windnd** — Windows 拖放支持
@@ -58,17 +71,6 @@ pip install windnd
 python main.py       # 控制台启动
 # 或双击 main.pyw    # 无控制台启动
 ```
-
-### 预打包版本（GitHub Releases）
-
-从 [Releases](https://github.com/Adnixzhong/Smart-Archive-Extractord/releases) 下载：
-
-| 版本 | 文件 | 大小 | 说明 |
-|------|------|------|------|
-| 单文件版 | `SmartArchiveExtractor-Nuitka.exe` | ~37 MB | Nuitka C 编译单文件，启动快，密码库和配置在 `%APPDATA%` |
-| 便携版 | `SmartArchiveExtractor-Nuitka-Portable.zip` | ~15 MB | Nuitka C 编译，解压即用，密码库和配置在 EXE 同目录 |
-
-> 打包版本仍需目标机器安装 7-Zip。
 
 ### 自行打包
 
