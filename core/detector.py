@@ -1,5 +1,7 @@
 """Archive format detection via magic bytes."""
 
+from __future__ import annotations
+
 from pathlib import Path
 from typing import Optional
 

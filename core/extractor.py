@@ -1,5 +1,7 @@
 """7-Zip extractor wrapper."""
 
+from __future__ import annotations
+
 import subprocess
 import re
 import os
@@ -7,17 +9,7 @@ import zipfile
 from pathlib import Path
 from typing import Optional, Callable
 
-
-def _subprocess_kwargs() -> dict:
-    """Return kwargs to hide console windows on Windows."""
-    kwargs: dict = {}
-    if os.name == "nt":
-        kwargs["creationflags"] = subprocess.CREATE_NO_WINDOW
-        si = subprocess.STARTUPINFO()
-        si.dwFlags |= subprocess.STARTF_USESHOWWINDOW
-        si.wShowWindow = subprocess.SW_HIDE
-        kwargs["startupinfo"] = si
-    return kwargs
+from . import subprocess_kwargs
 
 
 _7Z_CACHE: Optional[Path] = None
@@ -37,7 +29,7 @@ def find_7z() -> Optional[Path]:
             result = subprocess.run(
                 ["where", cmd] if os.name == "nt" else ["which", cmd],
                 capture_output=True, text=True, timeout=5,
-                **_subprocess_kwargs(),
+                **subprocess_kwargs(),
             )
             if result.returncode == 0:
                 found = result.stdout.strip().split("\n")[0].strip()
@@ -130,7 +122,7 @@ def extract(
             text=True,
             encoding="utf-8",
             errors="replace",
-            **_subprocess_kwargs(),
+                **subprocess_kwargs(),
         )
     except Exception as e:
         raise ExtractError(f"Failed to start 7z: {e}")
@@ -218,8 +210,8 @@ def extract_with_password_list(
             result = extract(archive_path, output_dir, password=pwd, progress_callback=progress_callback)
             if result.success:
                 return result
-            if not result.password_wrong and result.error and "Wrong password" not in str(result.error):
-                # Non-password error, don't keep trying
+            if not result.password_wrong and result.error:
+                # Non-password error (archive corrupt etc.) — don't keep trying
                 return result
         except ExtractError as e:
             if not e.password_wrong:
@@ -250,7 +242,7 @@ def _7z_test_password(archive_path: Path, password: str) -> bool:
             text=True,
             encoding="utf-8",
             errors="replace",
-            **_subprocess_kwargs(),
+                **subprocess_kwargs(),
         )
         output = proc.stdout.read() if proc.stdout else ""
         proc.wait()
@@ -274,14 +266,33 @@ def verify_password(archive_path: str | Path, password: str,
 
     lower = path.name.lower()
 
-    # ZIP fast-path: use Python's built-in zipfile (no subprocess overhead)
+    # ZIP fast-path: use Python's built-in zipfile (no subprocess overhead).
+    # Python's zipfile may not raise on wrong passwords for certain ZIP files
+    # (ZipCrypto with weak CRC, non-standard encryption from third-party tools).
+    # When zipfile accepts the password we always confirm with 7z test mode.
     if lower.endswith(".zip") or lower.endswith(".zip.001"):
+        zip_ok = False
+
         # Use pre-opened zipfile if provided (per-thread cached for cracking)
         if zip_file is not None:
             try:
                 zip_file.read(zip_file.namelist()[0],
                               pwd=password.encode("utf-8", errors="replace"))
-                return True
+                zip_ok = True
+            except NotImplementedError:
+                return _7z_test_password(path, password)
+            except (RuntimeError, zipfile.BadZipFile):
+                return False
+            except Exception:
+                return False
+        else:
+            try:
+                with zipfile.ZipFile(path, "r") as z:
+                    names = z.namelist()
+                    if not names:
+                        return False
+                    z.read(names[0], pwd=password.encode("utf-8", errors="replace"))
+                    zip_ok = True
             except NotImplementedError:
                 return _7z_test_password(path, password)
             except (RuntimeError, zipfile.BadZipFile):
@@ -289,19 +300,9 @@ def verify_password(archive_path: str | Path, password: str,
             except Exception:
                 return False
 
-        try:
-            with zipfile.ZipFile(path, "r") as z:
-                names = z.namelist()
-                if not names:
-                    return False
-                z.read(names[0], pwd=password.encode("utf-8", errors="replace"))
-                return True
-        except NotImplementedError:
+        if zip_ok:
             return _7z_test_password(path, password)
-        except (RuntimeError, zipfile.BadZipFile):
-            return False
-        except Exception:
-            return False
+        return False
 
     # All other formats: use 7z test mode (no disk writes)
     return _7z_test_password(path, password)

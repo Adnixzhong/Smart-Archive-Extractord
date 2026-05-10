@@ -1,5 +1,7 @@
 """Archive format signatures (magic bytes)."""
 
+from __future__ import annotations
+
 from dataclasses import dataclass
 from typing import Optional
 

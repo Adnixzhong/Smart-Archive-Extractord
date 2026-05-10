@@ -1,5 +1,7 @@
 """CrackDialog — password cracking configuration and progress UI."""
 
+from __future__ import annotations
+
 import os
 import tkinter as tk
 from tkinter import ttk, filedialog, messagebox
@@ -11,18 +13,12 @@ from core.cracker import (
     CrackConfig,
     CrackSession,
 )
-from core.tool_manager import (
-    get_tool_status,
-    download_tool,
-    TOOL_DEFS,
-    is_tool_available,
-)
 
 
 class CrackDialog(tk.Toplevel):
     """Dialog for configuring and running password cracking attacks."""
 
-    def __init__(self, parent, archive_path: str, *,
+    def __init__(self, parent, archive_paths: list[str], *,
                  app_colors=None, on_password_found=None):
         super().__init__(parent)
         self.title("密码破解")
@@ -35,18 +31,15 @@ class CrackDialog(tk.Toplevel):
             "green": "#58d68d", "red": "#ec7063", "yellow": "#f4d03f",
         }
         self.configure(bg=self._C["canvas"])
-        self._archive_path = archive_path
+        self._archive_paths = archive_paths
+        self._archive_path = archive_paths[0] if archive_paths else ""  # first as default
         self._on_password_found = on_password_found
 
         self._running = False
         self._session: CrackSession | None = None
         self._worker_thread: threading.Thread | None = None
         self._cancel_flag = threading.Event()
-
-        # GPU state
-        self._gpu_enabled = tk.BooleanVar(value=False)
-        self._gpu_tool_status: dict[str, bool] = {}
-        self._gpu_downloading = False
+        self._cracked_passwords: dict[str, str] = {}
 
         self.transient(parent)
         self.grab_set()
@@ -89,21 +82,64 @@ class CrackDialog(tk.Toplevel):
             canvas.itemconfig(self._content_id, width=event.width)
         canvas.bind("<Configure>", _canvas_configure)
 
-        # Mousewheel scrolling
-        def _on_mousewheel(event):
-            canvas.yview_scroll(-1 * (event.delta // 120), "units")
-        canvas.bind("<Enter>", lambda e: canvas.bind_all("<MouseWheel>", _on_mousewheel))
-        canvas.bind("<Leave>", lambda e: canvas.unbind_all("<MouseWheel>"))
+        # Scroll on mousewheel when cursor is over the canvas area,
+        # EXCEPT when over a Spinbox — those handle their own value adjustment.
+        # bind_all is needed because tkinter does NOT propagate <MouseWheel>
+        # from child widgets (Buttons, Entries, etc.) to parent frames.
+        def _on_spinbox_mousewheel(ev):
+            """Adjust Spinbox value ±1, respecting the widget's range."""
+            try:
+                v = int(ev.widget.get())
+                delta = 1 if ev.delta > 0 else -1
+                new = v + delta
+                lo = int(str(ev.widget['from']))
+                hi = int(str(ev.widget['to']))
+                if lo <= new <= hi:
+                    ev.widget.set(str(new))
+            except Exception:
+                pass
+
+        def _bind_spinboxes(parent):
+            for child in parent.winfo_children():
+                if isinstance(child, ttk.Spinbox):
+                    child.bind("<MouseWheel>", _on_spinbox_mousewheel)
+                else:
+                    _bind_spinboxes(child)
+
+        _bind_spinboxes(self._content)
+
+        def _on_mousewheel(ev):
+            # If over a Spinbox, let its own handler do the work
+            w = canvas.winfo_containing(ev.x_root, ev.y_root)
+            if w is not None and isinstance(w, ttk.Spinbox):
+                return
+            cx = canvas.winfo_rootx()
+            cy = canvas.winfo_rooty()
+            if cx <= ev.x_root <= cx + canvas.winfo_width() and \
+               cy <= ev.y_root <= cy + canvas.winfo_height():
+                canvas.yview_scroll(-1 * (ev.delta // 120), "units")
+
+        canvas.bind_all("<MouseWheel>", _on_mousewheel)
 
         cf = self._content  # short alias — all content goes here
 
         # Header
-        ttk.Label(cf, text=f"目标: {p.name}",
+        p = Path(self._archive_path)
+        count = len(self._archive_paths)
+        header_text = f"目标: {p.name} 等 {count} 个文件"
+        ttk.Label(cf, text=header_text,
                   font=("Segoe UI", 11, "bold")).pack(fill=tk.X, padx=12, pady=(12, 4))
 
-        # --- Attack type ---
+        # --- Attack type + selected files ---
         type_frame = ttk.LabelFrame(cf, text="攻击方式", padding=(10, 8))
         type_frame.pack(fill=tk.X, padx=12, pady=(8, 4))
+
+        type_row = ttk.Frame(type_frame)
+        type_row.pack(fill=tk.X)
+
+        # Left: attack type radio buttons
+        type_left = ttk.Frame(type_row)
+        type_left.pack(side=tk.LEFT, fill=tk.X, expand=True)
 
         self._attack_type = tk.StringVar(value="bruteforce")
         types = [
@@ -112,9 +148,25 @@ class CrackDialog(tk.Toplevel):
             ("掩码攻击 — 按模式生成 (? = 未知字符)", "mask"),
         ]
         for text, value in types:
-            rb = ttk.Radiobutton(type_frame, text=text, variable=self._attack_type,
+            rb = ttk.Radiobutton(type_left, text=text, variable=self._attack_type,
                                 value=value, command=self._on_type_changed)
             rb.pack(anchor="w", pady=2)
+
+        # Right: selected files list
+        type_right = ttk.Frame(type_row, width=200)
+        type_right.pack(side=tk.RIGHT, fill=tk.Y, padx=(12, 0))
+        ttk.Label(type_right, text="选中文件:",
+                  font=("Segoe UI", 9, "bold")).pack(anchor="w")
+        files_listbox = tk.Listbox(type_right, height=min(count, 6),
+                                   bg=C["surface"], fg=C["body"],
+                                   font=("Segoe UI", 9),
+                                   borderwidth=1, highlightthickness=0,
+                                   selectbackground=C["blue"],
+                                   selectforeground=C["canvas"])
+        files_listbox.pack(fill=tk.BOTH, expand=True)
+        for ap in self._archive_paths:
+            files_listbox.insert(tk.END, f"  {Path(ap).name}")
+        files_listbox.configure(state="disabled")
 
         # --- Charset selection (for brute force & mask) ---
         self._charset_frame = ttk.LabelFrame(cf, text="字符集", padding=(10, 8))
@@ -257,50 +309,6 @@ class CrackDialog(tk.Toplevel):
         ttk.Spinbox(settings_inner, from_=0, to=1440, textvariable=self._time_limit,
                     width=5).pack(side=tk.LEFT, padx=4)
 
-        # --- GPU acceleration ---
-        self._gpu_frame = ttk.LabelFrame(cf, text="GPU 加速 (hashcat)", padding=(10, 8))
-        self._gpu_frame.pack(fill=tk.X, padx=12, pady=4)
-
-        gpu_row1 = ttk.Frame(self._gpu_frame)
-        gpu_row1.pack(fill=tk.X)
-        gpu_cb = tk.Checkbutton(gpu_row1, text="启用 GPU 加速 (需要 hashcat + 兼容显卡)",
-                                variable=self._gpu_enabled,
-                                command=self._on_gpu_toggled,
-                                bg=C["canvas"], fg=C["body"],
-                                selectcolor=C["elevated"],
-                                activebackground=C["elevated"],
-                                activeforeground=C["ink"],
-                                font=("Segoe UI", 9))
-        gpu_cb.pack(side=tk.LEFT)
-
-        # Tools directory picker
-        from core.tool_manager import TOOLS_DIR
-        gpu_tools_dir_row = ttk.Frame(self._gpu_frame)
-        gpu_tools_dir_row.pack(fill=tk.X, pady=(6, 2))
-        ttk.Label(gpu_tools_dir_row, text="工具目录:",
-                  font=("Segoe UI", 9)).pack(side=tk.LEFT)
-        self._tools_dir_var = tk.StringVar(value=str(TOOLS_DIR))
-        tools_dir_entry = tk.Entry(gpu_tools_dir_row, textvariable=self._tools_dir_var,
-                                   bg=C["surface"], fg=C["body"], insertbackground=C["body"],
-                                   font=("Segoe UI", 9), relief="solid", borderwidth=1)
-        tools_dir_entry.pack(side=tk.LEFT, fill=tk.X, expand=True, padx=4)
-        ttk.Button(gpu_tools_dir_row, text="浏览...",
-                   command=self._browse_tools_dir).pack(side=tk.LEFT)
-        self._gpu_download_btn = ttk.Button(gpu_tools_dir_row, text="下载工具...",
-                                             command=self._download_gpu_tools)
-        self._gpu_download_btn.pack(side=tk.LEFT, padx=(4, 0))
-
-        self._gpu_status_frame = ttk.Frame(self._gpu_frame)
-        self._gpu_status_frame.pack(fill=tk.X, pady=(6, 0))
-        self._gpu_status_labels: dict[str, ttk.Label] = {}
-        for name in ["hashcat", "rar2john"]:
-            lbl = ttk.Label(self._gpu_status_frame, text=f"  {name}: 检测中...",
-                            font=("Segoe UI", 9), foreground=C["mute"])
-            lbl.pack(anchor="w")
-            self._gpu_status_labels[name] = lbl
-
-        self._refresh_gpu_status()
-
         # --- Progress ---
         progress_frame = ttk.LabelFrame(cf, text="进度", padding=(10, 8))
         progress_frame.pack(fill=tk.X, padx=12, pady=4)
@@ -322,8 +330,35 @@ class CrackDialog(tk.Toplevel):
         self._eta_label = ttk.Label(stats_inner, text="预计剩余: --", foreground=C["body"])
         self._eta_label.pack(side=tk.LEFT, padx=(16, 0))
 
+        # Cracked results display
+        self._cracked_label = ttk.Label(progress_frame, text="已破解:",
+                                        font=("Segoe UI", 9, "bold"))
+        self._cracked_text = tk.Text(progress_frame, height=4, wrap=tk.WORD,
+                                      state="disabled",
+                                      bg=C["surface"], fg=C["green"],
+                                      font=("Cascadia Code", 10),
+                                      borderwidth=1, highlightthickness=0,
+                                      selectbackground=C["blue"],
+                                      selectforeground=C["canvas"],
+                                      padx=6, pady=4)
+
         self._progress_bar = ttk.Progressbar(progress_frame, mode="indeterminate", length=400)
         self._progress_bar.pack(fill=tk.X, pady=(8, 0))
+
+        # --- Log output ---
+        log_frame = ttk.LabelFrame(cf, text="输出日志", padding=(4, 4))
+        log_frame.pack(fill=tk.BOTH, expand=True, padx=12, pady=4)
+
+        self._log_text = tk.Text(log_frame, height=6, wrap=tk.WORD, state="disabled",
+                                 bg=C["surface"], fg=C["body"],
+                                 font=("Cascadia Code", 9),
+                                 borderwidth=1, highlightthickness=0,
+                                 selectbackground=C["blue"],
+                                 selectforeground=C["canvas"])
+        log_scroll = ttk.Scrollbar(log_frame, orient=tk.VERTICAL, command=self._log_text.yview)
+        self._log_text.configure(yscrollcommand=log_scroll.set)
+        self._log_text.pack(side=tk.LEFT, fill=tk.BOTH, expand=True)
+        log_scroll.pack(side=tk.RIGHT, fill=tk.Y)
 
         self._on_type_changed()
 
@@ -367,19 +402,6 @@ class CrackDialog(tk.Toplevel):
         if path:
             self._dict_var.set(path)
 
-    def _browse_tools_dir(self):
-        path = filedialog.askdirectory(
-            title="选择 GPU 工具安装目录",
-            initialdir=self._tools_dir_var.get(),
-        )
-        if path:
-            self._tools_dir_var.set(path)
-            os.environ["SMART_AE_TOOLS_DIR"] = path
-            # Invalidate cached tools_dir in tool_manager
-            from core import tool_manager
-            tool_manager.TOOLS_DIR = Path(path)
-            self._refresh_gpu_status()
-
     def _get_selected_rules(self) -> list[str]:
         return [k for k, v in self._rule_vars.items() if v.get()]
 
@@ -388,72 +410,6 @@ class CrackDialog(tk.Toplevel):
         if custom:
             return "".join(dict.fromkeys(custom))  # deduplicate, preserve order
         return CHARSET_PRESETS.get(self._charset_preset.get(), "0123456789")
-
-    # ============================================================
-    #  GPU
-    # ============================================================
-
-    def _refresh_gpu_status(self):
-        self._gpu_tool_status = get_tool_status()
-        for name, lbl in self._gpu_status_labels.items():
-            ok = self._gpu_tool_status.get(name, False)
-            lbl.configure(
-                text=f"  {'✓' if ok else '✗'} {name}: {'已找到' if ok else '未找到'}",
-                foreground=self._C["green"] if ok else self._C["red"],
-            )
-
-    def _on_gpu_toggled(self):
-        self._refresh_gpu_status()
-        if self._gpu_enabled.get():
-            missing = [n for n, ok in self._gpu_tool_status.items() if not ok]
-            if missing:
-                messagebox.showwarning(
-                    "GPU 工具缺失",
-                    "以下工具未找到:\n  " + ", ".join(missing) + "\n\n请点击 [下载工具...] 按钮下载。",
-                    parent=self,
-                )
-
-    def _download_gpu_tools(self):
-        if self._gpu_downloading:
-            return
-        self._refresh_gpu_status()
-        missing = [n for n, ok in self._gpu_tool_status.items() if not ok]
-        if not missing:
-            messagebox.showinfo("工具状态", "所有 GPU 工具已就绪。", parent=self)
-            return
-
-        msg = f"将下载以下工具:\n  {', '.join(missing)}\n\n下载可能需要几分钟。继续？"
-        if not messagebox.askyesno("下载 GPU 工具", msg, parent=self):
-            return
-
-        self._gpu_downloading = True
-        self._gpu_download_btn.configure(state="disabled")
-
-        def _download_thread():
-            for name in missing:
-                self.after(0, lambda n=name: self._log_status(f"下载 {n}..."))
-                ok, err_msg = download_tool(
-                    name,
-                    progress_callback=lambda pct, msg: self.after(
-                        0, lambda p=msg: self._log_status(p)
-                    ),
-                )
-                if not ok:
-                    from core.tool_manager import TOOL_DEFS, TOOLS_DIR
-                    exe = TOOL_DEFS[name]["exe"]
-                    target = str(TOOLS_DIR / exe)
-                    self.after(0, lambda n=name, e=err_msg, t=target:
-                               messagebox.showerror("下载失败",
-                                                    f"{n} 下载失败。\n\n"
-                                                    f"错误: {e}\n\n"
-                                                    f"请手动下载并放到:\n{t}",
-                                                    parent=self))
-            self._gpu_downloading = False
-            self.after(0, self._refresh_gpu_status)
-            self.after(0, lambda: self._gpu_download_btn.configure(state="normal"))
-            self.after(0, lambda: self._log_status("就绪"))
-
-        threading.Thread(target=_download_thread, daemon=True).start()
 
     def _close(self):
         if self._running:
@@ -468,10 +424,6 @@ class CrackDialog(tk.Toplevel):
     # ============================================================
 
     def _start(self):
-        if self._gpu_enabled.get():
-            self._start_gpu()
-            return
-
         at = self._attack_type.get()
         charset = self._get_charset()
 
@@ -519,6 +471,12 @@ class CrackDialog(tk.Toplevel):
         if not configs:
             return
 
+        # Skip already-cracked files
+        uncracked = [ap for ap in self._archive_paths if ap not in self._cracked_passwords]
+        if not uncracked:
+            messagebox.showinfo("提示", "所有选中文件的密码已破解。", parent=self)
+            return
+
         self._running = True
         self._cancel_flag.clear()
         self._start_btn.configure(state="disabled")
@@ -526,177 +484,55 @@ class CrackDialog(tk.Toplevel):
         self._progress_bar.start(20)
 
         self._log_status("正在准备...")
-        self._session = CrackSession(
-            configs=configs,
-            archive_path=self._archive_path,
-            on_found=self._on_crack_found,
-            on_progress=self._on_crack_progress,
-            on_log=self._on_crack_log,
-        )
+        self._crack_configs = configs
         self._worker_thread = threading.Thread(target=self._crack_worker, daemon=True)
         self._worker_thread.start()
-
-    # ============================================================
-    #  GPU attack
-    # ============================================================
-
-    def _start_gpu(self):
-        """Launch GPU-accelerated cracking via hashcat."""
-        # Validate tools
-        missing = [n for n in ["hashcat", "rar2john"]
-                   if not is_tool_available(n)]
-        if missing:
-            messagebox.showerror("工具缺失",
-                                 f"缺少: {', '.join(missing)}\n请先下载工具。",
-                                 parent=self)
-            return
-
-        # Check for Bandizip incompatibility first
-        from core.hash_extractor import extract_hash, is_zip_bandizip_incompatible
-
-        bandizip_warning = is_zip_bandizip_incompatible(self._archive_path)
-        if bandizip_warning:
-            messagebox.showwarning("hashcat 兼容性警告", bandizip_warning, parent=self)
-            # Don't block — user can still try, or cancel and switch to CPU
-
-        self._log_status("提取哈希...")
-        hash_result = extract_hash(self._archive_path)
-        if hash_result is None:
-            messagebox.showerror("提取失败",
-                                 "无法提取密码哈希。\n可能原因：\n"
-                                 "- 文件未加密\n- 格式不受支持\n"
-                                 "- 缺少 rar2john / 7z2john",
-                                 parent=self)
-            return
-
-        hash_str, hashcat_mode, fmt_name = hash_result
-        self._log_status(f"哈希已提取 ({fmt_name}, 模式 {hashcat_mode})")
-
-        # Build hashcat config
-        from core.hashcat import HashcatConfig, HashcatSession
-
-        at = self._attack_type.get()
-        charset = self._get_charset()
-
-        hc_config = HashcatConfig(
-            attack_type=at,
-            charset=charset,
-            min_length=self._min_len.get(),
-            max_length=self._max_len.get(),
-            mask_pattern=self._mask_var.get().strip() if at == "mask" else "",
-            dictionary_path=self._dict_var.get().strip() if at == "dictionary" else "",
-            hashcat_mode=hashcat_mode,
-            hash_str=hash_str,
-            workload_profile=2,
-            optimise_kernel=True,
-            force=True,  # allow non-GPU OpenCL (CPU fallback via hashcat)
-        )
-
-        self._running = True
-        self._cancel_flag.clear()
-        self._start_btn.configure(state="disabled")
-        self._stop_btn.configure(state="normal")
-        self._progress_bar.start(20)
-        self._log_status(f"启动 hashcat (模式 {hashcat_mode})...")
-
-        self._hc_session = HashcatSession(
-            config=hc_config,
-            on_status=self._on_hashcat_status,
-            on_cracked=self._on_hashcat_cracked,
-            on_log=self._on_crack_log,
-        )
-        self._worker_thread = threading.Thread(target=self._gpu_worker, daemon=True)
-        self._worker_thread.start()
-
-    def _gpu_worker(self):
-        try:
-            password = self._hc_session.run() if hasattr(self, '_hc_session') else None
-        except Exception as e:
-            self.after(0, lambda: self._log_status(f"hashcat 错误: {e}"))
-            password = None
-        if password is None and hasattr(self, '_hc_session'):
-            err = self._hc_session.error_message
-            if err:
-                self.after(0, lambda e=err: messagebox.showerror(
-                    "hashcat 错误", f"GPU 破解失败:\n{e}", parent=self))
-                self.after(0, lambda: self._on_crack_stopped())
-                return
-        # If hashcat exhausted without finding password, check for Bandizip
-        if password is None and hasattr(self, '_hc_session'):
-            from core.hash_extractor import is_zip_bandizip_incompatible
-            bandizip_reason = is_zip_bandizip_incompatible(self._archive_path)
-            if bandizip_reason:
-                self.after(0, lambda r=bandizip_reason: messagebox.showwarning(
-                    "Bandizip 兼容性提示",
-                    f"hashcat 未找到密码。\n\n{r}\n\n"
-                    "推荐使用 CPU 模式重试（取消勾选 GPU 加速）。",
-                    parent=self))
-        self.after(0, lambda: self._on_crack_done(password))
-
-    def _on_hashcat_status(self, status: dict):
-        """Parse hashcat machine-readable status."""
-        speed = status.get("speed_hs", 0)
-        progress_pct = status.get("progress_pct", 0)
-        temp = status.get("gpu_temp", 0)
-        eta = status.get("eta_seconds", 0)
-        candidate = status.get("candidate", "")
-
-        self.after(0, lambda: self._update_gpu_progress(speed, progress_pct, temp, eta, candidate))
-
-    def _update_gpu_progress(self, speed: float, progress_pct: float, temp: int,
-                             eta: int, candidate: str):
-        if speed > 0:
-            if speed >= 1_000_000_000:
-                speed_str = f"{speed / 1_000_000_000:.1f} GH/s"
-            elif speed >= 1_000_000:
-                speed_str = f"{speed / 1_000_000:.1f} MH/s"
-            elif speed >= 1_000:
-                speed_str = f"{speed / 1_000:.1f} kH/s"
-            else:
-                speed_str = f"{speed:.0f} H/s"
-        else:
-            speed_str = "--"
-
-        if eta > 0:
-            h, m = int(eta // 3600), int((eta % 3600) // 60)
-            if h > 0:
-                eta_str = f"{h}h{m:02d}m"
-            else:
-                s = int(eta % 60)
-                eta_str = f"{m}m{s:02d}s"
-        else:
-            eta_str = "--"
-
-        self._speed_label.configure(text=f"GPU 速度: {speed_str}")
-        self._attempts_label.configure(text=f"进度: {progress_pct:.1f}%")
-        if temp > 0:
-            self._eta_label.configure(text=f"GPU: {temp}°C | 预计剩余: {eta_str}")
-        else:
-            self._eta_label.configure(text=f"预计剩余: {eta_str}")
-        if candidate:
-            self._current_pwd_label.configure(text=f"候选: {candidate[:40]}")
-
-    def _on_hashcat_cracked(self, password: str):
-        pass  # handled in _on_crack_done
 
     def _stop(self):
         self._cancel_flag.set()
         if self._session:
             self._session.cancel()
-        if hasattr(self, '_hc_session') and self._hc_session:
-            self._hc_session.cancel()
         self._log_status("正在停止...")
 
     def _crack_worker(self):
-        try:
-            result = self._session.run() if self._session else None
-        except Exception as e:
-            self.after(0, lambda: self._log_status(f"错误: {e}"))
-            result = None
-        self.after(0, lambda: self._on_crack_done(result))
+        for idx, archive_path in enumerate(self._archive_paths):
+            if self._cancel_flag.is_set():
+                break
+
+            path = Path(archive_path)
+
+            # Skip already-cracked files
+            if archive_path in self._cracked_passwords:
+                self.after(0, lambda i=idx, n=path.name:
+                           self._append_log(f"[{i+1}/{len(self._archive_paths)}] {n}: 已破解，跳过"))
+                continue
+
+            self.after(0, lambda i=idx, n=path.name:
+                       self._log_status(f"[{i+1}/{len(self._archive_paths)}] {n}"))
+
+            self._session = CrackSession(
+                configs=list(self._crack_configs),
+                archive_path=str(path),
+                on_found=self._on_crack_found,
+                on_progress=self._on_crack_progress,
+                on_log=self._on_crack_log,
+            )
+            try:
+                result = self._session.run()
+            except Exception as e:
+                self.after(0, lambda e=e: self._log_status(f"错误: {e}"))
+                result = None
+
+            if result:
+                self._cracked_passwords[archive_path] = result
+                self._add_cracked_result(archive_path, result)
+                self.after(0, lambda p=result: self._on_password_found and self._on_password_found(p))
+                # Continue to next file — don't stop
+
+        self.after(0, self._on_crack_all_done)
 
     def _on_crack_found(self, password: str):
-        pass  # handled in _on_crack_done
+        pass  # handled per-file in _crack_worker
 
     def _on_crack_progress(self, info: dict):
         pwd = info.get("current_password", "")
@@ -708,7 +544,7 @@ class CrackDialog(tk.Toplevel):
         self.after(0, lambda: self._update_progress_ui(pwd, speed, attempts, total_est, elapsed))
 
     def _on_crack_log(self, message: str):
-        self.after(0, lambda: self._log_status(message))
+        self.after(0, lambda: self._append_log(message))
 
     def _update_progress_ui(self, password: str, speed: float, attempts: int,
                              total_est: int, elapsed: float):
@@ -739,26 +575,69 @@ class CrackDialog(tk.Toplevel):
         self._start_btn.configure(state="normal")
         self._stop_btn.configure(state="disabled")
 
-    def _on_crack_done(self, password: str | None):
+    def _on_crack_all_done(self):
         self._running = False
+        self._session = None
         self._progress_bar.stop()
         self._start_btn.configure(state="normal")
         self._stop_btn.configure(state="disabled")
 
-        if password:
-            self._log_status(f"✓ 密码找到: {password}")
-            self._current_pwd_label.configure(text=f"密码: {password}")
-            if self._on_password_found:
-                self._on_password_found(password)
-            messagebox.showinfo("破解成功",
-                               f"密码已找到:\n{password}\n\n将自动填入文件密码。",
+        found = self._cracked_passwords
+        total = len(self._archive_paths)
+        success_count = len(found)
+
+        if success_count > 0:
+            unique_pwds = list(set(found.values()))
+            self._log_status(f"✓ 找到 {success_count}/{total} 个文件的密码")
+            self._current_pwd_label.configure(text="")
+            messagebox.showinfo("破解完成",
+                               f"已找到 {success_count}/{total} 个文件的密码\n\n"
+                               f"密码: {', '.join(unique_pwds)}",
                                parent=self)
         else:
             if not self._cancel_flag.is_set():
                 self._log_status("未找到密码 — 攻击已穷尽")
-                messagebox.showinfo("破解结束", "未找到密码，所有攻击方式已尝试完毕。", parent=self)
+                messagebox.showinfo("破解结束",
+                                   f"已尝试 {total} 个文件，未找到密码。",
+                                   parent=self)
             else:
                 self._log_status("已停止")
 
+    def _add_cracked_result(self, archive_path: str, password: str):
+        """Add a cracked entry to the real-time results display."""
+        self.after(0, lambda: self._add_cracked_result_ui(archive_path, password))
+
+    def _add_cracked_result_ui(self, archive_path: str, password: str):
+        name = Path(archive_path).name
+        self._cracked_text.configure(state="normal")
+        # Show the results widgets if they're hidden
+        if not self._cracked_label.winfo_ismapped():
+            self._cracked_label.pack(anchor="w", pady=(8, 2),
+                                     after=self._eta_label)
+            self._cracked_text.pack(fill=tk.BOTH, expand=True, pady=(0, 4),
+                                    after=self._cracked_label)
+        self._cracked_text.insert(tk.END, f"✓ {name}  →  {password}\n")
+        self._cracked_text.see(tk.END)
+        self._cracked_text.configure(state="disabled")
+
+    def _clear_cracked_results(self):
+        """Clear the cracked results display."""
+        self._cracked_text.configure(state="normal")
+        self._cracked_text.delete("1.0", tk.END)
+        self._cracked_text.configure(state="disabled")
+        if self._cracked_label.winfo_ismapped():
+            self._cracked_label.pack_forget()
+            self._cracked_text.pack_forget()
+
     def _log_status(self, msg: str):
         self._status_label.configure(text=msg)
+        self._append_log(msg)
+
+    def _append_log(self, msg: str):
+        try:
+            self._log_text.configure(state="normal")
+            self._log_text.insert(tk.END, msg + "\n")
+            self._log_text.see(tk.END)
+            self._log_text.configure(state="disabled")
+        except Exception:
+            pass

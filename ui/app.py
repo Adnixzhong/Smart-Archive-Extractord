@@ -1,11 +1,14 @@
 """Smart Archive Extractor — GUI Application."""
 
+from __future__ import annotations
+
 import os
 import sys
 import tkinter as tk
 from tkinter import ttk, filedialog, messagebox, simpledialog
 from pathlib import Path
 import threading
+import json
 import re
 import time
 import ctypes
@@ -49,6 +52,20 @@ def _get_monitor_work_area(x: int, y: int) -> tuple[int, int, int, int]:
     return (r.left, r.top, r.right, r.bottom)
 
 
+class _SHFILEOPSTRUCTW(ctypes.Structure):
+    """Shared struct for SHFileOperationW — used by recycle and restore operations."""
+    _fields_ = [
+        ("hwnd", ctypes.c_void_p),
+        ("wFunc", ctypes.c_uint),
+        ("pFrom", ctypes.c_wchar_p),
+        ("pTo", ctypes.c_wchar_p),
+        ("fFlags", ctypes.c_ushort),
+        ("fAnyOperationsAborted", ctypes.c_int),
+        ("hNameMappings", ctypes.c_void_p),
+        ("lpszProgressTitle", ctypes.c_wchar_p),
+    ]
+
+
 class LogHandler:
     def __init__(self, text_widget: tk.Text):
         self._text = text_widget
@@ -81,10 +98,10 @@ class ArchiveFileItem:
 
 class PasswordEditorDialog(tk.Toplevel):
     def __init__(self, parent, password_manager: PasswordManager, *,
-                 app_colors=None, on_change=None):
+                 app_colors=None, config_file=None, on_change=None):
         super().__init__(parent)
         self.title("密码库")
-        self.geometry("500x560")
+        self.geometry("500x620")
         self.minsize(400, 420)
         self._C = app_colors or {
             "canvas": "#15181d", "surface": "#1c2026", "elevated": "#22262d",
@@ -93,6 +110,7 @@ class PasswordEditorDialog(tk.Toplevel):
         }
         self.configure(bg=self._C["canvas"])
         self._pm = password_manager
+        self._config_file = config_file
         self._on_change = on_change
         self.transient(parent)
         self.grab_set()
@@ -150,6 +168,20 @@ class PasswordEditorDialog(tk.Toplevel):
         btn_frame.pack(fill=tk.X, padx=12, pady=4)
         ttk.Button(btn_frame, text="删除选中", command=self._delete_selected).pack(side=tk.LEFT, padx=(0, 4))
         ttk.Button(btn_frame, text="导出文件", command=self._export_file).pack(side=tk.LEFT, padx=4)
+
+        # Password file path row
+        path_frame = ttk.Frame(self)
+        path_frame.pack(fill=tk.X, padx=12, pady=(8, 0))
+        ttk.Label(path_frame, text="密码库路径:", font=("Segoe UI", 9)).pack(side=tk.LEFT)
+        current_path = str(self._pm.persist_path) if self._pm.persist_path else ""
+        self._path_var = tk.StringVar(value=current_path)
+        self._path_entry = tk.Entry(path_frame, textvariable=self._path_var,
+                                     bg=C["surface"], fg=C["body"],
+                                     insertbackground=C["body"],
+                                     font=("Segoe UI", 9), relief="solid", borderwidth=1)
+        self._path_entry.pack(side=tk.LEFT, fill=tk.X, expand=True, padx=4)
+        ttk.Button(path_frame, text="浏览...", command=self._browse_password_path).pack(side=tk.LEFT)
+        ttk.Button(path_frame, text="应用", command=self._apply_password_path).pack(side=tk.LEFT, padx=(4, 0))
 
         self._status_label = ttk.Label(self, text="", foreground=C["mute"])
         self._status_label.pack(fill=tk.X, padx=12, pady=(6, 12))
@@ -243,8 +275,48 @@ class PasswordEditorDialog(tk.Toplevel):
             else:
                 messagebox.showinfo("提示", "密码列表为空，未导出", parent=self)
 
+    def _browse_password_path(self):
+        path = filedialog.askopenfilename(parent=self, title="选择密码库文件",
+                                          filetypes=[("文本文件", "*.txt")])
+        if path:
+            self._path_var.set(path)
+
+    def _apply_password_path(self):
+        new_path = self._path_var.get().strip()
+        if not new_path:
+            messagebox.showwarning("提示", "路径不能为空", parent=self)
+            return
+        if not new_path.lower().endswith(".txt"):
+            messagebox.showwarning("提示", "密码库文件必须以 .txt 结尾", parent=self)
+            return
+        from pathlib import Path
+        new = Path(new_path)
+        self._pm.set_persistence(str(new))
+        if new.is_file():
+            count = self._pm.load(str(new))
+            self._refresh_list()
+            self._status_label.configure(text=f"已切换并加载 {count} 个密码")
+        else:
+            self._pm.save()
+            self._status_label.configure(text=f"密码库路径已更新（新文件将在保存时创建）")
+        # Persist to config so it survives restart
+        if self._config_file:
+            self._save_config_to(self._config_file, str(new))
+
+    @staticmethod
+    def _save_config_to(config_file, password_path: str):
+        try:
+            import json
+            config_file.parent.mkdir(parents=True, exist_ok=True)
+            with open(config_file, "w", encoding="utf-8") as f:
+                json.dump({"password_file": password_path}, f)
+        except Exception:
+            pass
+
 
 class SmartExtractorApp:
+    _PLACEHOLDER = "留空则默认输出到压缩包路径"
+
     def __init__(self, root: tk.Tk):
         self.root = root
         self.root.title("智能解压工具")
@@ -258,15 +330,19 @@ class SmartExtractorApp:
         self._password_manager = PasswordManager()
         if getattr(sys, "frozen", False):
             exe_dir = Path(sys.executable).resolve().parent
-            # Standalone/portable has companion DLLs → store next to exe
-            # Onefile is a lone exe → store in AppData
             companion_files = list(exe_dir.glob("*.dll")) + list(exe_dir.glob("*.pyd"))
             if companion_files:
-                self._password_file = exe_dir / "passwords.txt"
+                self._config_dir = exe_dir          # portable
             else:
-                self._password_file = Path(os.environ["APPDATA"]) / "Smart Archive Extractor" / "passwords.txt"
+                self._config_dir = Path(os.environ["APPDATA"]) / "Smart Archive Extractor"  # onefile
         else:
-            self._password_file = Path(__file__).resolve().parent.parent / "passwords.txt"
+            self._config_dir = Path(__file__).resolve().parent.parent  # source
+        self._config_file = self._config_dir / "config.json"
+        self._password_file = self._config_dir / "passwords.txt"
+        # Load custom password path from config (single-file EXE can persist settings this way)
+        custom = self._load_config()
+        if custom and Path(custom).is_file():
+            self._password_file = Path(custom)
         self._password_manager.set_persistence(self._password_file)
         self._auto_rename = tk.BooleanVar(value=True)
         self._auto_password = tk.BooleanVar(value=True)
@@ -452,7 +528,7 @@ class SmartExtractorApp:
                                            font=("Segoe UI", 10),
                                            relief="solid", borderwidth=1)
         self._output_dir_entry.pack(side=tk.LEFT, fill=tk.X, expand=True, padx=(6, 4))
-        self._output_dir_entry.insert(0, "留空则默认输出到压缩包路径")
+        self._output_dir_entry.insert(0, self._PLACEHOLDER)
         self._output_dir_entry.bind("<FocusIn>", self._on_output_dir_focus_in)
         self._output_dir_entry.bind("<FocusOut>", self._on_output_dir_focus_out)
         self._output_dir_entry.bind("<KeyRelease>", self._on_output_dir_key)
@@ -709,8 +785,20 @@ class SmartExtractorApp:
             item.is_split = True
             vols = find_volumes(path)
             item.volume_count = len(vols)
+        # Save currently selected paths before refresh clears them
+        selected_paths = set()
+        for iid in self._tree_pending.selection():
+            idx = int(self._tree_pending.index(iid))
+            if 0 <= idx < len(self._files):
+                selected_paths.add(self._files[idx].path)
         self._files.append(item)
+        selected_paths.add(item.path)  # new item should be selected too
         self._refresh_pending_list()
+        # Restore selections (old + new) by matching paths
+        for iid in self._tree_pending.get_children():
+            idx = int(iid)
+            if 0 <= idx < len(self._files) and self._files[idx].path in selected_paths:
+                self._tree_pending.selection_add(iid)
 
     def _remove_selected(self):
         selected = self._tree_pending.selection()
@@ -739,10 +827,8 @@ class SmartExtractorApp:
             self._tree_pending.insert("", "end", iid=str(i),
                                       values=(i + 1, f.path.name, f.detected_format,
                                               pwd_display, str(f.path.parent)))
-        # Auto-select all pending files, toggle drop hint
-        all_iids = self._tree_pending.get_children()
-        if all_iids:
-            self._tree_pending.selection_set(all_iids)
+        # Toggle drop hint based on whether there are any items
+        if self._tree_pending.get_children():
             self._pending_drop_hint.place_forget()
         else:
             self._pending_drop_hint.place(relx=0.5, rely=0.5, anchor="center")
@@ -832,18 +918,26 @@ class SmartExtractorApp:
             self.root.clipboard_append("\n".join(paths))
 
     def _on_tree_click(self, event):
-        """Handle left-click: if on password column, start inline edit."""
+        """Handle left-click: toggle row selection, or inline edit on password column."""
         self._end_pwd_edit()
         region = self._tree_pending.identify_region(event.x, event.y)
         if region != "cell":
             return
-        col = self._tree_pending.identify_column(event.x)
-        if col != "#4":  # password column
-            return
         iid = self._tree_pending.identify_row(event.y)
         if not iid:
             return
-        self._begin_pwd_edit(iid)
+        col = self._tree_pending.identify_column(event.x)
+
+        if col == "#4":
+            # Password column — open inline edit
+            self._begin_pwd_edit(iid)
+        else:
+            # Toggle clicked row: select if unselected, deselect if already selected
+            if iid in self._tree_pending.selection():
+                self._tree_pending.selection_remove(iid)
+            else:
+                self._tree_pending.selection_add(iid)
+        return "break"  # prevent tkinter's default selection behavior
 
     def _begin_pwd_edit(self, iid: str):
         """Overlay an Entry widget on the password cell."""
@@ -918,6 +1012,7 @@ class SmartExtractorApp:
     def _open_password_editor(self):
         dlg = PasswordEditorDialog(self.root, self._password_manager,
                                     app_colors=self._C,
+                                    config_file=self._config_file,
                                     on_change=lambda: None)
         self._position_dialog(dlg, side="left")
         self._update_pwd_count_display()
@@ -932,16 +1027,30 @@ class SmartExtractorApp:
             else:
                 self._logger.log("密码列表为空，未导出")
 
+    def _load_config(self):
+        try:
+            if self._config_file.is_file():
+                with open(self._config_file, "r", encoding="utf-8") as f:
+                    cfg = json.load(f)
+                return cfg.get("password_file", "")
+        except Exception:
+            pass
+        return ""
+
+    def _save_config(self, password_file_path: str):
+        try:
+            self._config_file.parent.mkdir(parents=True, exist_ok=True)
+            with open(self._config_file, "w", encoding="utf-8") as f:
+                json.dump({"password_file": str(password_file_path)}, f)
+        except Exception:
+            pass
+
     def _load_persistent_passwords(self):
         """Auto-load passwords on startup."""
         if self._password_file.is_file():
             count = self._password_manager.load()
             if count:
                 self._logger.log(f"已加载 {count} 个密码")
-
-    def _save_persistent_passwords(self):
-        """Save passwords (called automatically by PasswordManager on add/remove)."""
-        pass
 
     def _update_pwd_count_display(self):
         total = self._password_manager.total_count
@@ -961,14 +1070,14 @@ class SmartExtractorApp:
 
     def _on_output_dir_focus_in(self, event):
         """Clear placeholder when user clicks into the output dir entry."""
-        if self._output_dir_entry.get() == "留空则默认输出到压缩包路径":
+        if self._output_dir_entry.get() == self._PLACEHOLDER:
             self._output_dir_entry.delete(0, "end")
             self._output_dir_entry.configure(fg=self._C["body"])
 
     def _on_output_dir_key(self, event):
         """Sync entry content to _output_dir on each keystroke."""
         text = self._output_dir_entry.get().strip()
-        if text == "留空则默认输出到压缩包路径":
+        if text == self._PLACEHOLDER:
             self._output_dir.set("")
         else:
             self._output_dir.set(text)
@@ -978,7 +1087,7 @@ class SmartExtractorApp:
         if not self._output_dir_entry.get().strip():
             self._output_dir.set("")
             self._output_dir_entry.delete(0, "end")
-            self._output_dir_entry.insert(0, "留空则默认输出到压缩包路径")
+            self._output_dir_entry.insert(0, self._PLACEHOLDER)
             self._output_dir_entry.configure(fg=self._C["mute"])
 
     def _browse_output_dir(self):
@@ -1051,22 +1160,9 @@ class SmartExtractorApp:
         """Move a file to the Windows recycle bin. Returns True on success."""
         try:
             path_str = str(filepath.resolve())
-            # SHFileOperationW expects double-null-terminated string
             buf = ctypes.create_unicode_buffer(path_str + "\0\0")
 
-            class SHFILEOPSTRUCTW(ctypes.Structure):
-                _fields_ = [
-                    ("hwnd", ctypes.c_void_p),
-                    ("wFunc", ctypes.c_uint),
-                    ("pFrom", ctypes.c_wchar_p),
-                    ("pTo", ctypes.c_wchar_p),
-                    ("fFlags", ctypes.c_ushort),
-                    ("fAnyOperationsAborted", ctypes.c_int),
-                    ("hNameMappings", ctypes.c_void_p),
-                    ("lpszProgressTitle", ctypes.c_wchar_p),
-                ]
-
-            fop = SHFILEOPSTRUCTW()
+            fop = _SHFILEOPSTRUCTW()
             fop.hwnd = None
             fop.wFunc = 3  # FO_DELETE
             fop.pFrom = ctypes.cast(buf, ctypes.c_wchar_p)
@@ -1512,10 +1608,9 @@ class SmartExtractorApp:
                 elif archive_path.exists():
                     all_to_delete.append(archive_path)
 
-            # Move to completed
+            # Move to completed — schedule on main thread to avoid race conditions
             if item.status in ("done", "error"):
-                self._files.remove(item)
-                self._completed.append(item)
+                self.root.after(0, lambda i=item: (self._files.remove(i), self._completed.append(i)))
 
             self._ui_update_all()
             self.root.after(0, lambda: self._progress.configure(value=0))
@@ -1576,36 +1671,36 @@ class SmartExtractorApp:
     #  Password cracking
     # ============================================================
 
-    def _get_selected_file_path(self) -> str | None:
-        """Return the path of the first selected pending file."""
+    def _get_selected_file_paths(self) -> list[str]:
+        """Return paths of all selected pending files (may be empty)."""
         selected = self._tree_pending.selection()
-        if not selected:
-            return None
-        idx = int(self._tree_pending.index(selected[0]))
-        if 0 <= idx < len(self._files):
-            return str(self._files[idx].path)
-        return None
+        paths = []
+        for iid in selected:
+            idx = int(self._tree_pending.index(iid))
+            if 0 <= idx < len(self._files):
+                paths.append(str(self._files[idx].path))
+        return paths
 
     def _open_crack_from_menu(self):
         """Open crack dialog from right-click menu."""
-        path = self._get_selected_file_path()
-        if not path:
+        paths = self._get_selected_file_paths()
+        if not paths:
             return
-        self._open_crack_dialog_for_path(path)
+        self._open_crack_dialog_for_paths(paths)
 
     def _open_crack_dialog(self):
-        """Open crack dialog from toolbar button (uses first pending file)."""
-        path = self._get_selected_file_path()
-        if not path:
-            messagebox.showinfo("提示", "请先选择待解压列表中的文件", parent=self.root)
+        """Open crack dialog from toolbar button (uses all selected files)."""
+        paths = self._get_selected_file_paths()
+        if not paths:
+            messagebox.showinfo("提示", "请先在待解压列表中选中要破解的文件（蓝色项）", parent=self.root)
             return
-        self._open_crack_dialog_for_path(path)
+        self._open_crack_dialog_for_paths(paths)
 
-    def _open_crack_dialog_for_path(self, archive_path: str):
-        """Open the crack dialog for a specific archive file."""
-        dlg = CrackDialog(self.root, archive_path,
+    def _open_crack_dialog_for_paths(self, archive_paths: list[str]):
+        """Open the crack dialog for multiple selected archive files."""
+        dlg = CrackDialog(self.root, archive_paths,
                           app_colors=self._C,
-                          on_password_found=lambda pwd: self._on_crack_password_found(archive_path, pwd))
+                          on_password_found=lambda pwd: self._on_crack_passwords_found(archive_paths, pwd))
         self._position_dialog(dlg, side="right")
 
     @staticmethod
@@ -1636,18 +1731,16 @@ class SmartExtractorApp:
 
     def _save_password_to_library(self, password: str):
         """Save a working password to the password library."""
-        if password and password not in self._password_manager.get_all_passwords():
-            self._password_manager.add(password)
+        if password and self._password_manager.add(password):
             self._update_pwd_count_display()
 
-    def _on_crack_password_found(self, archive_path: str, password: str):
-        """When password is cracked, set it on the matching file item and save to library."""
-        norm = str(Path(archive_path).resolve())
+    def _on_crack_passwords_found(self, archive_paths: list[str], password: str):
+        """When password is cracked, set it on all matching file items and save to library."""
+        norms = {str(Path(p).resolve()) for p in archive_paths}
         for f in self._files:
-            if str(f.path.resolve()) == norm:
+            if str(f.path.resolve()) in norms:
                 f.specific_password = password
                 self._logger.log(f"密码已填入: {f.path.name}")
-                break
         self._save_password_to_library(password)
         self._refresh_pending_list()
 
@@ -1868,19 +1961,7 @@ class RecycleBinRestoreDialog(tk.Toplevel):
             dest_str = str(orig.resolve()) + "\0\0"
             dest_buf = ctypes.create_unicode_buffer(dest_str)
 
-            class SHFILEOPSTRUCTW(ctypes.Structure):
-                _fields_ = [
-                    ("hwnd", ctypes.c_void_p),
-                    ("wFunc", ctypes.c_uint),
-                    ("pFrom", ctypes.c_wchar_p),
-                    ("pTo", ctypes.c_wchar_p),
-                    ("fFlags", ctypes.c_ushort),
-                    ("fAnyOperationsAborted", ctypes.c_int),
-                    ("hNameMappings", ctypes.c_void_p),
-                    ("lpszProgressTitle", ctypes.c_wchar_p),
-                ]
-
-            fop = SHFILEOPSTRUCTW()
+            fop = _SHFILEOPSTRUCTW()
             fop.hwnd = None
             fop.wFunc = 1  # FO_MOVE
             fop.pFrom = ctypes.cast(buf, ctypes.c_wchar_p)

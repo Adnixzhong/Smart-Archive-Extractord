@@ -1,2 +1,8 @@
 passwords.txt
 data/
+__pycache__/
+*.pyc
+build/
+dist/
+*.spec
+*.zip

@@ -1,5 +1,7 @@
 """File renaming based on detected archive format."""
 
+from __future__ import annotations
+
 from pathlib import Path
 from typing import Optional
 import re
