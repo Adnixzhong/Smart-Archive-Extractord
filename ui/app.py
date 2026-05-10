@@ -330,11 +330,11 @@ class SmartExtractorApp:
         self._password_manager = PasswordManager()
         if getattr(sys, "frozen", False):
             exe_dir = Path(sys.executable).resolve().parent
-            companion_files = list(exe_dir.glob("*.dll")) + list(exe_dir.glob("*.pyd"))
-            if companion_files:
-                self._config_dir = exe_dir          # portable
+            # Nuitka onefile extracts to a temp dir named "onefile_<pid>_<random>"
+            if exe_dir.name.startswith("onefile_"):
+                self._config_dir = Path(os.environ["APPDATA"]) / "SmartArchiveExtractor"
             else:
-                self._config_dir = Path(os.environ["APPDATA"]) / "Smart Archive Extractor"  # onefile
+                self._config_dir = exe_dir          # portable
         else:
             self._config_dir = Path(__file__).resolve().parent.parent  # source
         self._config_file = self._config_dir / "config.json"
