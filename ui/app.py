@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import os
 import sys
+import shutil
 import tkinter as tk
 from tkinter import ttk, filedialog, messagebox, simpledialog
 from pathlib import Path
@@ -15,10 +16,11 @@ import ctypes
 
 import windnd
 
+from core.binary_detect import is_executable_binary
 from core.detector import detect_with_tar_combo, detect
-from core.split_detector import find_volumes, is_split_archive
+from core.split_detector import find_volumes, is_split_archive, get_first_volume
 from core.renamer import get_correct_path, needs_rename
-from core.extractor import extract, find_7z, ExtractError, scan_for_archives
+from core.extractor import extract, find_7z, ExtractError
 from core.password import PasswordManager
 from ui.crack_dialog import CrackDialog
 
@@ -315,7 +317,7 @@ class PasswordEditorDialog(tk.Toplevel):
 
 
 class SmartExtractorApp:
-    _PLACEHOLDER = "留空则默认输出到压缩包路径"
+    _PLACEHOLDER = "留空则默认输出到压缩包路径（不打钩=普通解压，保留文件夹结构）"
 
     def __init__(self, root: tk.Tk):
         self.root = root
@@ -350,6 +352,7 @@ class SmartExtractorApp:
         self._output_mode = tk.StringVar(value="subfolder")  # "flat" | "subfolder"
         self._subfolder_name = tk.StringVar(value="")
         self._output_dir = tk.StringVar(value="")
+        self._custom_output = tk.BooleanVar(value=True)
         self._open_after = tk.BooleanVar(value=False)
         self._pwd_overlays: list[tk.Frame] = []
         self._cancel_flag = threading.Event()
@@ -518,10 +521,13 @@ class SmartExtractorApp:
         self._subfolder_name.trace_add("write", self._update_output_preview)
         ttk.Label(row4, text=" 文件夹（留空=压缩包名）").pack(side=tk.LEFT)
 
-        # Output directory
+        # Output directory — checkbox toggles smart/simple mode
         row4b = ttk.Frame(opt_frame)
         row4b.pack(fill=tk.X, pady=(2, 6))
-        ttk.Label(row4b, text="输出目录:").pack(side=tk.LEFT)
+        self._chk_custom_output = tk.Checkbutton(row4b, text="", variable=self._custom_output,
+                                                   command=self._on_custom_output_toggle)
+        self._chk_custom_output.pack(side=tk.LEFT)
+        ttk.Label(row4b, text="输出目录:").pack(side=tk.LEFT, padx=(2, 0))
         self._output_dir_entry = tk.Entry(row4b,
                                            bg=self._C["surface"], fg=self._C["mute"],
                                            insertbackground=self._C["body"],
@@ -532,7 +538,8 @@ class SmartExtractorApp:
         self._output_dir_entry.bind("<FocusIn>", self._on_output_dir_focus_in)
         self._output_dir_entry.bind("<FocusOut>", self._on_output_dir_focus_out)
         self._output_dir_entry.bind("<KeyRelease>", self._on_output_dir_key)
-        ttk.Button(row4b, text="浏览...", command=self._browse_output_dir).pack(side=tk.LEFT)
+        self._browse_output_btn = ttk.Button(row4b, text="浏览...", command=self._browse_output_dir)
+        self._browse_output_btn.pack(side=tk.LEFT)
 
         row5 = ttk.Frame(opt_frame)
         row5.pack(fill=tk.X, pady=(6, 0))
@@ -768,11 +775,41 @@ class SmartExtractorApp:
             if p:
                 self._add_file_item(Path(p))
 
+    def _get_split_dedup_key(self, path: Path) -> Path | None:
+        """Return canonical first-volume path for dedup.
+        Covers files that are already split archives and files that will
+        become split archives after rename (e.g. .part1.jpg → .part1.rar)."""
+        if is_split_archive(path):
+            return get_first_volume(path).resolve()
+        if needs_rename(path):
+            target = get_correct_path(path)
+            if target and is_split_archive(target):
+                target_vols = find_volumes(target)
+                if target_vols:
+                    return (path.parent / target_vols[0].name).resolve()
+        return None
+
     def _add_file_item(self, path: Path):
+        if path.is_dir():
+            for f in path.iterdir():
+                if f.is_file() and f.stat().st_size >= 2:
+                    fmt = detect(f)
+                    if fmt is not None:
+                        self._add_file_item(f)
+                        continue
+                    lower = f.name.lower()
+                    if re.match(r".+\.\d{3,}$", lower) or re.match(r".+\.r\d{2,}$", lower) or \
+                       re.match(r".+\.part\d+\.rar$", lower):
+                        self._add_file_item(f)
+            return
         if not path.is_file():
             return
+        # Resolve split archives to first volume for dedup, including
+        # files that will become split archives after rename (e.g. .part1.jpg → .part1.rar).
+        dedup_key = self._get_split_dedup_key(path) or path.resolve()
         for f in self._files:
-            if f.path == path:
+            f_key = self._get_split_dedup_key(f.path) or f.path.resolve()
+            if dedup_key == f_key:
                 return
         item = ArchiveFileItem(path)
         fmt = detect_with_tar_combo(path)
@@ -785,6 +822,11 @@ class SmartExtractorApp:
             item.is_split = True
             vols = find_volumes(path)
             item.volume_count = len(vols)
+        elif item.will_rename and item.target_name:
+            target = path.with_name(item.target_name)
+            if is_split_archive(target):
+                item.is_split = True
+                item.volume_count = len(find_volumes(target))
         # Save currently selected paths before refresh clears them
         selected_paths = set()
         for iid in self._tree_pending.selection():
@@ -1090,6 +1132,15 @@ class SmartExtractorApp:
             self._output_dir_entry.insert(0, self._PLACEHOLDER)
             self._output_dir_entry.configure(fg=self._C["mute"])
 
+    def _on_custom_output_toggle(self):
+        """Enable/disable output directory entry when checkbox toggles."""
+        if self._custom_output.get():
+            self._output_dir_entry.configure(state="normal")
+            self._browse_output_btn.configure(state="normal")
+        else:
+            self._output_dir_entry.configure(state="disabled")
+            self._browse_output_btn.configure(state="disabled")
+
     def _browse_output_dir(self):
         """Open folder picker to override the output directory."""
         current = self._output_dir.get() or str(self._get_default_output_dir() or ".")
@@ -1102,8 +1153,11 @@ class SmartExtractorApp:
 
     def _get_output_path(self, item) -> Path:
         """Compute the output directory for an archive item."""
-        override = self._output_dir.get()
-        base_dir = Path(override) if override else item.path.parent
+        if self._custom_output.get():
+            override = self._output_dir.get()
+            base_dir = Path(override) if override else item.path.parent
+        else:
+            base_dir = item.path.parent
         if self._output_mode.get() == "subfolder":
             name = self._subfolder_name.get().strip() or item.path.stem
             return base_dir / name
@@ -1223,13 +1277,14 @@ class SmartExtractorApp:
                 self._ui_log(f"  已尝试 {tried}/{len(passwords)} 个密码...")
         return (False, None, "密码字典未找到正确密码")
 
-    def _extract_one(self, archive_path, item):
+    def _extract_one(self, archive_path, item, output_dir=None):
         """Extract one archive. Returns (output_dir, password_used).
 
-        Output directory is determined by output_mode, subfolder_name, and
-        optional output_dir override.
+        If output_dir is given, extract there directly (used by smart-mode
+        work-dir extraction). Otherwise the directory is determined by
+        output_mode, subfolder_name, and _output_dir.
         """
-        item_output = self._get_output_path(item)
+        item_output = Path(output_dir) if output_dir else self._get_output_path(item)
         item_output.mkdir(parents=True, exist_ok=True)
         auto_pwd = self._auto_password.get()
         final_password = None
@@ -1306,184 +1361,142 @@ class SmartExtractorApp:
         return (str(item_output), final_password)
 
     # ============================================================
-    #  Smart nested detection
+    #  Smart nested detection — peel algorithm
     # ============================================================
 
-    def _check_smart_nested(self, output_dir: str, parent_password: str | None,
-                            skip_files: set | None = None) -> list[Path]:
-        """Check extraction result. Auto-extract single wrapped archive,
-        scan for nested archives. Returns list of extracted archive paths to delete."""
-        out_path = Path(output_dir)
-        if not out_path.is_dir():
-            return []
-        contents = list(out_path.iterdir())
-        if not contents:
-            return []
+    def _peel_recursive(self, dirpath: Path, peeled: set, password_ctx: str | None):
+        """Recursively peel nested archives in-place.
 
-        skip = skip_files or set()
-        files_in_root = [f for f in contents if f.is_file() and f.resolve() not in skip]
-        dirs_in_root = [d for d in contents if d.is_dir()]
+        For each directory: if an executable binary is found the directory
+        is left untouched (archives stay). Otherwise every compressible
+        archive is extracted into the *same* directory (no subfolder) and
+        added to ``peeled`` for later cleanup.
 
-        to_delete: list[Path] = []
-
-        # Case 1: Single archive file directly in output → auto-extract
-        if len(files_in_root) == 1 and len(dirs_in_root) == 0:
-            sole = files_in_root[0]
-            if detect(sole) is not None:
-                self._ui_log(f"  [智能] 检测到嵌套归档: {sole.name}")
-                to_delete.extend(self._process_single_nested(sole, parent_password, skip_files=skip))
-                return to_delete
-
-        # Case 2: Archive files among multiple items (e.g. wrap_folder=False)
-        for f in files_in_root:
+        The outer caller is responsible for creating the initial work
+        directory — this function never creates subfolders for extraction.
+        """
+        while True:
             if self._cancel_flag.is_set():
-                break
-            if detect(f) is not None:
-                self._ui_log(f"  [智能] 检测到嵌套归档: {f.name}")
-                to_delete.extend(self._process_single_nested(f, parent_password, skip_files=skip))
-        if to_delete:
-            return to_delete
+                return
 
-        # Case 3: Single directory wrapper
-        if len(contents) != 1 or not contents[0].is_dir():
-            return []
+            entries = list(dirpath.iterdir())
+            files = [e for e in entries if e.is_file() and e.resolve() not in peeled]
+            subdirs = [e for e in entries if e.is_dir()]
 
-        inner_dir = contents[0]
-        inner_files = [f for f in inner_dir.iterdir() if f.is_file()]
-        inner_dirs = [d for d in inner_dir.iterdir() if d.is_dir()]
+            # Stop condition: executable binary → don't touch archives here
+            for f in files:
+                if is_executable_binary(f):
+                    return
 
-        # Pattern A: single file, detected as archive → auto-extract
-        if len(inner_files) == 1 and len(inner_dirs) == 0:
-            sole = inner_files[0]
-            if detect(sole) is not None:
-                self._ui_log(f"  [智能] 检测到嵌套归档: {inner_dir.name}/{sole.name}")
-                to_delete.extend(self._process_single_nested(sole, parent_password, skip_files=skip))
+            # Recurse into subdirectories first (depth-first)
+            for sd in sorted(subdirs):
+                self._peel_recursive(sd, peeled, password_ctx)
 
-        # Pattern B: complex structure → auto-scan for archives
-        elif len(inner_files) > 0 or len(inner_dirs) > 0:
-            self._ui_log(f"  [嵌套] {out_path.name}/{inner_dir.name}/ 内含:")
-            for f in inner_files:
-                fmt = detect(f)
-                tag = f" [{fmt.name}]" if fmt else ""
-                self._ui_log(f"    - {f.name}{tag}")
-            for d in inner_dirs:
-                self._ui_log(f"    - {d.name}/")
-            to_delete.extend(self._process_nested_dir(str(inner_dir), parent_password, skip_files=skip))
+            # Re-read after recursion may have changed subdirs
+            entries = list(dirpath.iterdir())
+            files = [e for e in entries if e.is_file() and e.resolve() not in peeled]
 
-        return to_delete
+            # Collect unpeeled archives
+            archives: list[Path] = []
+            for f in files:
+                if is_split_archive(f):
+                    first = get_first_volume(f)
+                    if first.resolve() not in peeled:
+                        archives.append(first)
+                elif detect(f) is not None:
+                    archives.append(f)
 
-    def _process_single_nested(self, filepath: Path, parent_password: str | None,
-                               skip_files: set | None = None) -> list[Path]:
-        """Extract a single nested archive file. Returns list of archive paths to delete."""
-        if self._cancel_flag.is_set():
-            return []
-        fmt = detect_with_tar_combo(filepath)
-        if fmt is None:
-            return []
-        self._ui_log(f"    → {filepath.name} [{fmt.name}]")
+            if not archives:
+                return
 
-        working = filepath
-        # Split detection
-        if is_split_archive(working):
-            vols = find_volumes(working)
-            if len(vols) > 1:
-                self._ui_log(f"      分卷: {len(vols)} 个")
-                for v in vols[:6]:
-                    self._ui_log(f"        - {v.name}")
-            first_vol = vols[0] if vols else working
-        else:
-            first_vol = working
+            # Peel one archive — extract in-place, no subfolder
+            archive = archives[0]
 
-        # Rename if needed
-        if not is_split_archive(working) and self._auto_rename.get() and needs_rename(working):
-            correct = get_correct_path(working)
-            if correct and not working.with_name(correct.name).exists():
-                try:
+            # Split volumes
+            if is_split_archive(archive):
+                vols = find_volumes(archive)
+                first_vol = vols[0] if vols else archive
+            else:
+                vols = [archive]
+                first_vol = archive
+
+            # Rename if needed
+            working = first_vol
+            if not is_split_archive(working) and self._auto_rename.get() and needs_rename(working):
+                correct = get_correct_path(working)
+                if correct:
                     new_path = working.with_name(correct.name)
-                    working.rename(new_path)
-                    working = new_path
-                    first_vol = new_path
-                    self._ui_log(f"      已改名: {filepath.name} → {correct.name}")
+                    if not new_path.exists():
+                        try:
+                            working.rename(new_path)
+                            self._ui_log(f"  已改名: {working.name} → {correct.name}")
+                            working = new_path
+                            first_vol = new_path
+                        except OSError:
+                            pass
+
+            self._ui_log(f"  [揭皮] {first_vol.name}")
+
+            # Attempt extraction: inherit parent password → no password → dictionary
+            success = False
+            found_pwd = None
+            auto_pwd = self._auto_password.get()
+
+            # Try parent password
+            if password_ctx:
+                try:
+                    r = extract(first_vol, dirpath, password=password_ctx)
+                    if r.success:
+                        self._ui_log(f"    ✓ 解压完成 (继承密码)")
+                        success = True
+                        found_pwd = password_ctx
+                except ExtractError:
+                    pass
+
+            # Try no password
+            if not success:
+                try:
+                    r = extract(first_vol, dirpath)
+                    if r.success:
+                        self._ui_log(f"    ✓ 解压完成 (无密码)")
+                        success = True
+                except ExtractError:
+                    pass
+
+            # Try dictionary
+            if not success and auto_pwd:
+                passwords = [p for p in self._password_manager.get_all_passwords()
+                             if p not in {password_ctx, ""}]
+                for pwd in passwords:
+                    if self._cancel_flag.is_set():
+                        break
+                    try:
+                        r = extract(first_vol, dirpath, password=pwd)
+                        if r.success:
+                            self._ui_log(f"    ✓ 解压完成 (密码: {pwd})")
+                            self._save_password_to_library(pwd)
+                            success = True
+                            found_pwd = pwd
+                            break
+                    except ExtractError:
+                        break
+                if not success:
+                    self._ui_log(f"    ⚠ 密码字典未匹配")
+
+            # Mark all volumes as peeled and remove them immediately.
+            # Nested archives are deleted on the spot — "peeling" means
+            # extracting their contents then discarding the shell.
+            for v in vols:
+                peeled.add(v.resolve())
+                try:
+                    v.unlink()
                 except OSError:
                     pass
 
-        # Output dir
-        override = self._output_dir.get()
-        base_dir = Path(override) if override else first_vol.parent
-        if self._output_mode.get() == "subfolder":
-            name = self._subfolder_name.get().strip()
-            if not name:
-                stem = Path(first_vol.name).stem
-                stem = re.sub(r'\.part\d+', '', stem, flags=re.IGNORECASE)
-                stem = re.sub(r'\.r\d{2,}$', '', stem, flags=re.IGNORECASE)
-                stem = re.sub(r'\.\d{3,}$', '', stem, flags=re.IGNORECASE)
-                name = stem.rstrip('.') or first_vol.stem
-            nest_output = base_dir / name
-        else:
-            nest_output = base_dir
-        nest_output.mkdir(parents=True, exist_ok=True)
+            if success and found_pwd:
+                password_ctx = found_pwd
 
-        # Extract
-        success = False
-        nested_pwd = None
-        auto_pwd = self._auto_password.get()
-
-        # Parent password first
-        if parent_password:
-            try:
-                r = extract(first_vol, nest_output, password=parent_password)
-                if r.success:
-                    self._ui_log(f"      ✓ 解压完成 (继承上级密码)")
-                    success = True
-                    nested_pwd = parent_password
-            except ExtractError:
-                pass
-
-        # No password
-        if not success:
-            try:
-                r = extract(first_vol, nest_output)
-                if r.success:
-                    self._ui_log(f"      ✓ 解压完成 (无密码)")
-                    success = True
-            except ExtractError:
-                pass
-
-        # Dictionary
-        if not success and auto_pwd:
-            passwords = [p for p in self._password_manager.get_all_passwords()
-                         if p not in {parent_password, ""}]
-            for pwd in passwords:
-                if self._cancel_flag.is_set():
-                    break
-                try:
-                    r = extract(first_vol, nest_output, password=pwd)
-                    if r.success:
-                        self._ui_log(f"      ✓ 解压完成 (密码: {pwd})")
-                        success = True
-                        nested_pwd = pwd
-                        break
-                except ExtractError:
-                    break
-            if not success:
-                self._ui_log(f"      ⚠ 密码字典未匹配")
-
-        to_delete: list[Path] = []
-
-        if success:
-            # Merge incoming skip_files with the archive we just extracted
-            inherited_skip = (skip_files or set()) | {first_vol.resolve()}
-            to_delete.extend(self._check_smart_nested(
-                str(nest_output), nested_pwd or parent_password, skip_files=inherited_skip))
-            # Flatten nested output
-            self._flatten_and_clean(str(nest_output))
-            # Defer deletion: return archive paths for later deletion
-            if is_split_archive(working):
-                to_delete.extend([v for v in find_volumes(working) if v.exists()])
-            elif working.exists():
-                to_delete.append(working)
-
-        return to_delete
+            # Loop — new content may contain more archives or executables
 
     def _flatten_and_clean(self, output_dir: str):
         """Collapse single-folder wrappers recursively (bottom-up)."""
@@ -1504,8 +1517,16 @@ class SmartExtractorApp:
             contents = list(path.iterdir())
             dirs = [d for d in contents if d.is_dir()]
 
-            # If exactly one directory, collapse it (even if files are present)
+            # Collapse if a single directory with no sibling files,
+            # or if the sole directory name matches a file's stem (extraction shell).
+            files = [f for f in contents if f.is_file()]
+            should_flatten = False
             if len(dirs) == 1:
+                if len(files) == 0:
+                    should_flatten = True
+                elif any(dirs[0].name.lower() == f.stem.lower() for f in files):
+                    should_flatten = True
+            if should_flatten:
                 inner = dirs[0]
                 moved = 0
                 for item in inner.iterdir():
@@ -1521,19 +1542,6 @@ class SmartExtractorApp:
                     self._ui_log(f"  [展平] {inner.name}/ → {path.name}/")
                     changed = True
 
-    def _process_nested_dir(self, dirpath: str, parent_password: str | None,
-                            skip_files: set | None = None) -> list[Path]:
-        """Scan a directory for archives and extract them. Returns list of archive paths to delete."""
-        nested = scan_for_archives(dirpath)
-        if not nested:
-            return []
-        self._ui_log(f"  [嵌套处理] 发现 {len(nested)} 个压缩包")
-        to_delete: list[Path] = []
-        for npath in nested:
-            if self._cancel_flag.is_set():
-                break
-            to_delete.extend(self._process_single_nested(npath, parent_password, skip_files=skip_files))
-        return to_delete
 
     # ============================================================
     #  Extraction worker
@@ -1594,14 +1602,56 @@ class SmartExtractorApp:
                     else:
                         self._ui_log(f"  ⚠ 目标文件已存在，跳过改名")
 
-            # Step 4: Snapshot pre-existing files BEFORE extraction
-            pre_output = self._get_output_path(item)
-            pre_existing = {p.resolve() for p in pre_output.iterdir()} if pre_output.is_dir() else set()
+            # Step 2b: Re-check split after rename (.part1.jpg → .part1.rar)
+            if not item.is_split and is_split_archive(archive_path):
+                vols = find_volumes(archive_path)
+                if len(vols) > 1:
+                    self._ui_log(f"  检测到分卷 (改名后): {len(vols)} 个")
+                    for v in vols[:6]:
+                        self._ui_log(f"    - {v.name}")
+                first_vol = vols[0] if vols else archive_path
+                item.is_split = True
+                item.volume_count = len(vols)
 
-            item_output, parent_pwd = self._extract_one(first_vol, item)
-            item.output_path = item_output
+            # Step 4: Extract — smart mode uses a temporary work directory,
+            # normal mode extracts directly to the output directory.
+            if self._custom_output.get():
+                # --- Smart mode ---
+                work_dir = item.path.parent / item.path.stem
+                if work_dir.exists():
+                    work_dir = item.path.parent / (item.path.stem + "_extract")
+                item_output, parent_pwd = self._extract_one(first_vol, item,
+                                                            output_dir=str(work_dir))
+                item.output_path = item_output
 
-            # Step 5: Collect outer archive paths for deferred deletion
+                if item.status == "done":
+                    # Peel nested archives in-place (they are deleted as they are peeled)
+                    peeled: set[Path] = set()
+                    self._peel_recursive(work_dir, peeled, parent_pwd)
+
+                    # Move contents to final output directory
+                    final_output = self._get_output_path(item)
+                    final_output.mkdir(parents=True, exist_ok=True)
+                    for entry in list(work_dir.iterdir()):
+                        target = final_output / entry.name
+                        if not target.exists():
+                            shutil.move(str(entry), str(target))
+                    item.output_path = str(final_output)
+
+                    # Remove empty work directory
+                    try:
+                        work_dir.rmdir()
+                    except OSError:
+                        self._ui_log(f"  ⚠ 工作目录非空: {work_dir.name}")
+
+                    # Flatten
+                    self._flatten_and_clean(str(final_output))
+            else:
+                # --- Normal mode ---
+                item_output, parent_pwd = self._extract_one(first_vol, item)
+                item.output_path = item_output
+
+            # Step 5: Collect outer archive for deferred deletion
             if item.status == "done" and self._delete_mode.get() != "none":
                 if is_split_archive(archive_path):
                     all_to_delete.extend([v for v in find_volumes(archive_path) if v.exists()])
@@ -1614,13 +1664,6 @@ class SmartExtractorApp:
 
             self._ui_update_all()
             self.root.after(0, lambda: self._progress.configure(value=0))
-
-            # Step 6: Smart nested detection (skip pre-existing files)
-            if item.status == "done":
-                all_to_delete.extend(self._check_smart_nested(item_output, parent_pwd,
-                                                               skip_files=pre_existing))
-                # Flatten output tree recursively
-                self._flatten_and_clean(item_output)
 
         # Step 7: Delete all successfully extracted archives (outer + nested)
         if all_to_delete and self._delete_mode.get() != "none":

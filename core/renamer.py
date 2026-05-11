@@ -70,8 +70,14 @@ def get_correct_path(filepath: str | Path) -> Optional[Path]:
     if name_lower.endswith(suggested.lower()):
         return None
 
-    # Build new name: strip known extensions, then add correct one
+    # Build new name: strip wrong extension(s), keep .partN as split indicator,
+    # then add the correct extension.
+    #  archive.part1.jpg → archive.part1.rar   (NOT archive.part1.jpg.rar)
+    #  archive.jpg       → archive.rar
     stem = path.name
+    stripped = False
+
+    # Step 1 – strip known archive extensions
     for test_ext in [".tar.gz", ".tar.bz2", ".tar.xz", ".tar.zst",
                      ".tgz", ".tbz2", ".txz",
                      ".gz", ".bz2", ".xz", ".zst", ".lz4",
@@ -80,10 +86,18 @@ def get_correct_path(filepath: str | Path) -> Optional[Path]:
                      ".tar", ".r00", ".r01"]:
         if stem.lower().endswith(test_ext):
             stem = stem[:-len(test_ext)]
+            stripped = True
             break
 
-    # Strip .partN suffix if present
-    stem = re.sub(r'\.part\d+$', '', stem, flags=re.IGNORECASE)
+    # Step 2 – strip leftover wrong extension (e.g. .jpg where .rar is correct)
+    if '.' in stem and not stem.lower().endswith(suggested.lower()):
+        stem = stem.rsplit('.', 1)[0]
+        stripped = True
+
+    # Step 3 – only strip .partN if the file had no other extension
+    # (i.e. .partN was the extension itself). Otherwise keep it.
+    if not stripped:
+        stem = re.sub(r'\.part\d+$', '', stem, flags=re.IGNORECASE)
 
     new_name = stem + suggested
     return path.with_name(new_name)
