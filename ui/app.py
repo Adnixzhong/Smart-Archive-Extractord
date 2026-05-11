@@ -1435,7 +1435,7 @@ class SmartExtractorApp:
                         except OSError:
                             pass
 
-            self._ui_log(f"  [揭皮] {first_vol.name}")
+            self._ui_log(f"  [嵌套] 解压: {first_vol.name}")
 
             # Attempt extraction: inherit parent password → no password → dictionary
             success = False
